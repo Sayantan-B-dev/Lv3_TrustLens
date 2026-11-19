@@ -21,7 +21,7 @@ These instructions apply to the whole repository. Read `srs.md` / `docs/source/S
 
 ## Workflow
 
-- Run commands from the repository root. Backend commands use `services/backend/.venv`.
+- Run commands from the repository root. Backend commands use `backend/.venv` (or `python backend/run.py`).
 - Make the smallest coherent change; do not add unrequested features or dependencies.
 - No automatic `git commit`, push, deploy, paid resource or testnet spend. A user must explicitly request those actions.
 - Do not rewrite migrations that have been applied; add a new Alembic revision.
@@ -30,19 +30,19 @@ These instructions apply to the whole repository. Read `srs.md` / `docs/source/S
 ## Checks before calling work complete
 
 ```bash
-cd services/backend && ./.venv/Scripts/python.exe -m pytest
-pnpm --dir apps/web typecheck && pnpm --dir apps/web test && pnpm --dir apps/web build
-pnpm --dir contracts test
+python backend/run.py -m pytest
+cd frontend && pnpm typecheck && pnpm test && pnpm build
+cd backend/contracts && pnpm test
 ```
 
-For database changes, also run `./.venv/Scripts/python.exe -m alembic upgrade head` against a scratch database. For UI changes, check desktop and narrow layouts and report any unverified visual behaviour.
+For database changes, also run `python backend/run.py -m alembic upgrade head` against a scratch database. For UI changes, check desktop and narrow layouts and report any unverified visual behaviour.
 
 ## Layout
 
-- `apps/web/components/Dashboard.tsx` owns client state and API actions.
-- `services/backend/trustlens/intelligence/` contains deterministic checks and the risk engine.
-- `services/backend/trustlens/api/` contains HTTP endpoints and serialisers.
-- `services/backend/trustlens/services/jobs.py` owns queue leases and retries.
-- `services/backend/trustlens/security/` owns SSRF, TLS context, redaction, sessions, canonicalisation.
-- `contracts/` owns the registry and its tests.
+- `frontend/components/Dashboard.tsx` owns client state and API actions.
+- `backend/trustlens/intelligence/` contains deterministic checks and the risk engine.
+- `backend/trustlens/api/` contains HTTP endpoints and serialisers.
+- `backend/trustlens/services/jobs.py` owns queue leases and retries.
+- `backend/trustlens/security/` owns SSRF, TLS context, redaction, sessions, canonicalisation.
+- `backend/contracts/` owns the registry and its tests.
 - Project-specific skills live in `.agents/skills/`; specialist roles in `.opencode/agents/`.

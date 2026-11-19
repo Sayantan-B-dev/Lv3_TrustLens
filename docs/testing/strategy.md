@@ -4,12 +4,12 @@
 
 | Suite | Command | Scope |
 | --- | --- | --- |
-| Backend (66 tests) | `cd services/backend && ./.venv/Scripts/python.exe -m pytest` | SSRF/netguard, URL normalisation, domain heuristics, message IOC extraction, risk boundaries, canonical digests, API ownership, automation, reports, SSRF pipeline behaviour, worker retries/leases, AI validation/fallback |
-| Frontend unit (5 tests) | `pnpm --dir apps/web test` | Formatting/display helpers |
-| Frontend typecheck | `pnpm --dir apps/web typecheck` | Strict TypeScript across components and API types |
-| Frontend production build | `pnpm --dir apps/web build` | Next.js/Turbopack compilation, route generation |
-| Contracts (8 tests) | `pnpm --dir contracts test` | Storage, events, metadata, duplicate rejection, zero digest, owner-only, ownership transfer, missing reference |
-| Browser smoke (1 flow) | `pnpm --dir apps/web test:e2e` | Message investigation, deterministic risk render, report creation and local digest verification through the real UI |
+| Backend (66 tests) | `python backend/run.py -m pytest` | SSRF/netguard, URL normalisation, domain heuristics, message IOC extraction, risk boundaries, canonical digests, API ownership, automation, reports, SSRF pipeline behaviour, worker retries/leases, AI validation/fallback |
+| Frontend unit (5 tests) | `cd frontend && pnpm test` | Formatting/display helpers |
+| Frontend typecheck | `cd frontend && pnpm typecheck` | Strict TypeScript across components and API types |
+| Frontend production build | `cd frontend && pnpm build` | Next.js/Turbopack compilation, route generation |
+| Contracts (8 tests) | `cd backend/contracts && pnpm test` | Storage, events, metadata, duplicate rejection, zero digest, owner-only, ownership transfer, missing reference |
+| Browser smoke (1 flow) | `cd frontend && pnpm test:e2e` | Message investigation, deterministic risk render, report creation and local digest verification through the real UI |
 
 Backend tests use SQLite and stub DNS/HTTP/TLS for deterministic API runs. They never contact the public internet.
 

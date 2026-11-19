@@ -5,7 +5,7 @@ description: Use when changing ReportRegistry.sol, deploy scripts, contract test
 
 # Solidity report registry
 
-Files: `contracts/contracts/ReportRegistry.sol`, `contracts/test/`, `scripts/deploy.ts`, `services/chain.py`.
+Files: `backend/contracts/contracts/ReportRegistry.sol`, `backend/contracts/test/`, `backend/contracts/scripts/deploy.ts`, `backend/trustlens/services/chain.py`.
 
 Contract rules:
 
@@ -19,8 +19,8 @@ Contract rules:
 Local workflow:
 
 ```bash
-pnpm --dir contracts node
-pnpm --dir contracts deploy:local
+cd backend/contracts && pnpm node
+cd backend/contracts && pnpm deploy:local
 # set CHAIN_CONTRACT_ADDRESS, restart API
 ```
 

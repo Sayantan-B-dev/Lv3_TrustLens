@@ -13,10 +13,10 @@ This guide deploys the existing code. The agent did **not** create accounts, dep
 
 ## 2. Backend — Render
 
-The repository includes [`render.yaml`](../../render.yaml). Either use the blueprint or create a Web Service manually:
+The repository includes [`backend/render.yaml`](../../backend/render.yaml). Either use the blueprint or create a Web Service manually:
 
 - **Repository:** this repo.
-- **Root directory:** `services/backend`.
+- **Root directory:** `backend`.
 - **Runtime:** Python 3.13.
 - **Build command:** `pip install -r requirements.txt && alembic upgrade head`
 - **Start command:** `uvicorn trustlens.main:app --host 0.0.0.0 --port $PORT`
@@ -56,7 +56,7 @@ If migrations fail, confirm `DIRECT_DATABASE_URL` is the direct host and that th
 ## 3. Frontend — Vercel
 
 1. Import the repository into Vercel.
-2. **Root Directory:** `apps/web`.
+2. **Root Directory:** `frontend`.
 3. Framework preset: Next.js. Build command `pnpm build` (default), install at repo root via the workspace.
 4. Environment variable:
 
@@ -66,7 +66,7 @@ BACKEND_URL=https://YOUR-SERVICE.onrender.com
 
 5. Deploy. Open the Vercel URL. The `/api/*` rewrite proxies to Render, so cookies stay on the Vercel origin.
 
-If Vercel's build cannot see workspace dependencies, set the project root to the repository root and the output/app directory to `apps/web`; the included `pnpm-workspace.yaml` is the source of truth.
+If Vercel's build cannot see workspace dependencies, set the project root to the repository root and the output/app directory to `frontend`; the included `pnpm-workspace.yaml` is the source of truth.
 
 Update Render's `CORS_ORIGINS`/`FRONTEND_URL` to the final Vercel domain after the first deploy, then restart the service.
 
@@ -85,7 +85,13 @@ Local only by default. A public testnet would require explicit approval, a funde
 
 ## 6. CI
 
-`.github/workflows/ci.yml` runs backend tests, frontend typecheck/tests/build, and contract tests on push/PR. It needs no secrets and does not deploy.
+This trimmed repository does not bundle a CI workflow. If you add one, run:
+
+- `python backend/run.py -m pytest`
+- `cd frontend && pnpm typecheck && pnpm test && pnpm build`
+- `cd backend/contracts && pnpm test`
+
+No secrets are required for those checks, and none of them deploy.
 
 ## Free-tier limitations (be honest with judges/users)
 

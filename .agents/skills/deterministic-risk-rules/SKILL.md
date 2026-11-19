@@ -5,7 +5,7 @@ description: Use when changing risk weights, thresholds, classifications, confid
 
 # Deterministic risk rules
 
-File: `services/backend/trustlens/intelligence/risk.py`. Ruleset version: `trustlens-rules-v1`.
+File: `backend/trustlens/intelligence/risk.py`. Ruleset version: `trustlens-rules-v1`.
 
 Current logic:
 

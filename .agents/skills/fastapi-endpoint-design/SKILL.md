@@ -15,7 +15,7 @@ Conventions:
 - Errors use `{"error": {"message", "status", "request_id"}}` from the global handlers.
 - Return 202 for accepted async work, 201 for created records, 204 for deletes.
 - Rate-limit submissions and general API traffic.
-- Serialise through shared functions; keep `apps/web/lib/types.ts` in sync.
+- Serialise through shared functions; keep `frontend/lib/types.ts` in sync.
 - Never return secrets, raw messages, stack traces or internal paths.
 - Add request IDs to logs, not payloads.
 - Idempotency: existing uncommitted reports are reused; new revisions get new report refs.

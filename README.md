@@ -29,10 +29,10 @@
 Browser
   │
   ▼
-Next.js 16 dashboard (apps/web)
-  │  /api/* rewrite (BACKEND_URL)
+Next.js 16 dashboard (frontend)
+  │  /api/* rewrite (BACKEND_URL) or direct NEXT_PUBLIC_API_BASE_URL
   ▼
-FastAPI API + embedded worker (services/backend)
+FastAPI API + embedded worker (backend)
   ├── Intelligence pipeline ── URL · DNS · HTTP · TLS · headers · messages · correlation
   ├── Deterministic risk engine (trustlens-rules-v1)
   ├── Optional AI explainer (evidence-bound, validated, fallback)
@@ -61,15 +61,15 @@ The API and worker share one process for the free-tier MVP. The job queue lives 
 ## Repository layout
 
 ```text
-apps/web/                Next.js dashboard, API client, Vitest tests
-services/backend/        FastAPI app, intelligence engine, AI, worker, migrations, pytest
-contracts/               ReportRegistry.sol, Hardhat config, deploy script, contract tests
+frontend/                Pure Next.js dashboard, API client, Vitest tests
+backend/                 FastAPI app, intelligence engine, AI, worker, migrations, pytest
+backend/contracts/       Optional Solidity ReportRegistry, Hardhat config and tests
+backend/run.py             Start the API or run backend commands with the venv
 docs/                    SRS copy, architecture, security, testing, deployment, AI, learning
 .agents/skills/          Project-specific engineering skills
 .opencode/agents/        Specialist project agents
-scripts/                 Commit planner and handoff generator
-.github/workflows/       CI
-render.yaml              Render blueprint for the API
+AGENTS.md                Repository rules for AI agents
+README.md                This file
 ```
 
 ---
@@ -84,74 +84,55 @@ render.yaml              Render blueprint for the API
 
 ---
 
-## Run locally — complete process
+## Run locally
 
-Follow these steps in order. Commands are run from the repository root unless stated otherwise.
+Two terminals, nothing else.
 
-### 1. Install JavaScript dependencies
+### Backend — terminal 1
+
+First time only:
 
 ```bash
+python -m venv backend/.venv
+backend/.venv/Scripts/python -m pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env
+```
+
+Start the API:
+
+```bash
+python backend/run.py
+```
+
+- API: <http://127.0.0.1:8000>
+- Docs: <http://127.0.0.1:8000/docs>
+- Health: <http://127.0.0.1:8000/health>
+
+`backend/run.py` uses `backend/.venv` automatically. Apply migrations when needed with `python backend/run.py -m alembic upgrade head`; local SQLite tables are also created at startup by default.
+
+macOS/Linux use `backend/.venv/bin/python` instead of `backend/.venv/Scripts/python`.
+
+### Frontend — terminal 2
+
+```bash
+cd frontend
 pnpm install
+cp .env.example .env.local
+pnpm dev
 ```
 
-### 2. Create the backend environment
+Open <http://localhost:3000>.
 
-```bash
-cd services/backend
-python -m venv .venv
-./.venv/Scripts/python.exe -m pip install --upgrade pip
-./.venv/Scripts/python.exe -m pip install -r requirements.txt
-```
+### Environment and CORS
 
-### 3. Create your environment file
+- **`backend/.env`** — API, database, sessions, AI, threat intel, chain.
+- **`frontend/.env.local`** — backend URL and optional direct API mode.
 
-From the repository root:
+By default the frontend calls `/api/v1/*` and Next.js proxies it to `BACKEND_URL`, so no CORS setup is needed. For direct cross-origin calls, set `NEXT_PUBLIC_API_BASE_URL` in `frontend/.env.local` and add the frontend origin to `CORS_ORIGINS` (or `FRONTEND_URL`) in `backend/.env`.
 
-```bash
-cp .env.example .env
-```
+Never commit either env file.
 
-The defaults use SQLite at `services/backend/trustlens.db`, enable the embedded worker, and need no credentials. Never commit `.env`.
-
-Optional frontend override (only if the API is not on `127.0.0.1:8000`):
-
-```bash
-printf 'BACKEND_URL=http://127.0.0.1:8000\n' > apps/web/.env.local
-```
-
-### 4. Apply the database migration
-
-```bash
-cd services/backend
-./.venv/Scripts/python.exe -m alembic upgrade head
-```
-
-`AUTO_CREATE_SCHEMA=true` also creates missing tables at startup, but migrations are the source of truth for PostgreSQL.
-
-### 5. Start the API (terminal 1)
-
-```bash
-cd services/backend
-./.venv/Scripts/python.exe -m uvicorn trustlens.main:app --reload --port 8000
-```
-
-Verify:
-
-```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/ready
-# API docs: http://127.0.0.1:8000/docs
-```
-
-### 6. Start the dashboard (terminal 2)
-
-```bash
-pnpm --dir apps/web dev
-```
-
-Open **http://localhost:3000**. The dashboard proxies `/api/*` to `BACKEND_URL` (default `http://127.0.0.1:8000`), so cookies and requests stay on one origin.
-
-### 7. Use it
+### 5. Use it
 
 1. Choose **URL / domain** or **Scam message**.
 2. Paste a target and submit. Automatic mode queues it immediately; Manual mode saves a draft you can run.
@@ -171,7 +152,7 @@ Open **http://localhost:3000**. The dashboard proxies `/api/*` to `BACKEND_URL` 
 DATABASE_URL=sqlite+pysqlite:///./trustlens.db
 ```
 
-Relative paths resolve from the backend working directory (`services/backend`).
+Relative paths resolve from the backend working directory (`backend`).
 
 ### PostgreSQL / Neon
 
@@ -185,8 +166,7 @@ DIRECT_DATABASE_URL=postgresql+psycopg://trustlens:YOUR_PASSWORD@localhost:5432/
 For Neon, use the **pooled** URL for `DATABASE_URL` and the **direct** URL for `DIRECT_DATABASE_URL` (Alembic). Then run:
 
 ```bash
-cd services/backend
-./.venv/Scripts/python.exe -m alembic upgrade head
+python backend/run.py -m alembic upgrade head
 ```
 
 If `psql` is not on PATH on Windows, create the database/user with pgAdmin's Query Tool. Do not put credentials in Git or chat.
@@ -195,27 +175,27 @@ If `psql` is not on PATH on Windows, create the database/user with pgAdmin's Que
 
 ## Tests and checks
 
-Run from the repository root, with the backend virtual environment activated for Python commands.
+Run from the repository root. The helper scripts use `backend/.venv` automatically.
 
 ```bash
 # Backend: 66 tests — SSRF/netguard, normalisation, domain, messages, risk, canonical JSON,
 # API ownership, pause/manual mode, reports, worker retries/leases, AI validation fallback
-cd services/backend && ./.venv/Scripts/python.exe -m pytest
+python backend/run.py -m pytest
 
 # Frontend typecheck, unit tests and production build
-pnpm --dir apps/web typecheck
-pnpm --dir apps/web test
-pnpm --dir apps/web build
+cd frontend && pnpm typecheck
+cd frontend && pnpm test
+cd frontend && pnpm build
 
 # Solidity: compile + 8 contract tests
-pnpm --dir contracts build
-pnpm --dir contracts test
+cd backend/contracts && pnpm build
+cd backend/contracts && pnpm test
 
-# Optional browser smoke flow (requires Google Chrome and both services running)
-pnpm --dir apps/web test:e2e
+# Optional browser smoke flow (requires Google Chrome)
+cd frontend && pnpm test:e2e
 ```
 
-If you activated the venv, `pnpm test:api` and `pnpm db:migrate` are convenience aliases.
+For database changes, `python backend/run.py -m alembic upgrade head` applies migrations; no activation is required.
 
 ---
 
@@ -225,13 +205,13 @@ The application works without a chain. To exercise the Web3 path locally:
 
 ```bash
 # Terminal 3 — local Hardhat node (chain ID 31337)
-pnpm --dir contracts node
+cd backend/contracts && pnpm node
 
 # Terminal 4 — deploy once per node session
-pnpm --dir contracts deploy:local
+cd backend/contracts && pnpm deploy:local
 ```
 
-Copy the printed address into your root `.env`:
+Copy the printed address into your `backend/.env`:
 
 ```env
 CHAIN_RPC_URL=http://127.0.0.1:8545
@@ -265,10 +245,10 @@ Production must change `SESSION_SECRET`, set `COOKIE_SECURE=true`, and use `ENVI
 
 Detailed beginner-friendly steps are in [`docs/deployment/free-tier.md`](docs/deployment/free-tier.md). The intended free topology:
 
-- **Vercel** — Next.js in `apps/web`; set `BACKEND_URL` to the Render URL.
-- **Render** — one Python web service from `services/backend`; `render.yaml` is included.
+- **Vercel** — Next.js in `frontend`; set `BACKEND_URL` to the Render URL.
+- **Render** — one Python web service from `backend`; `backend/render.yaml` is included.
 - **Neon** — PostgreSQL; pooled URL for the app, direct URL for migrations.
-- **GitHub Actions** — CI only (`.github/workflows/ci.yml`).
+- **GitHub Actions** — optional CI only; no workflow is bundled in this trimmed repository.
 
 Free tiers sleep, have instance-hour and usage limits, and are not an uptime guarantee. Local development never requires these accounts.
 
@@ -282,7 +262,7 @@ Free tiers sleep, have instance-hour and usage limits, and are not an uptime gua
 - **AI:** schema-validated output; every claim must cite an existing evidence ID; unknown IDs trigger deterministic fallback; AI never sets or overrides risk. Message text is untrusted data, never instructions.
 - **Privacy:** raw messages are redacted for display/logging; reports mask emails/phones and store only indicator digests and values where needed; retention defaults are 7 days anonymous / 90 days signed-in.
 - **Web3:** only `report_ref` + `digest` go on-chain; verification proves byte integrity, not truthfulness.
-- **No secrets in the repo.** `.env` is ignored; `.env.example` contains only a documented local dev key.
+- **No secrets in the repo.** Env files are ignored; the committed `.env.example` files contain only documented local defaults.
 
 ---
 
@@ -298,7 +278,7 @@ Free tiers sleep, have instance-hour and usage limits, and are not an uptime gua
 | Alembic cannot connect | `DIRECT_DATABASE_URL` must be a direct (non-pooled) PostgreSQL URL. |
 | Google sign-in redirects fail | Register the exact `GOOGLE_REDIRECT_URI`, including scheme/host/port. |
 | Commit says registry not configured | Set `CHAIN_CONTRACT_ADDRESS`, restart, and ensure the Hardhat node is running. |
-| Port already in use | `pnpm --dir apps/web dev -- -p 3001` or change the uvicorn port and `BACKEND_URL`. |
+| Port already in use | `pnpm --dir frontend dev -- -p 3001` or change the uvicorn port and `BACKEND_URL`. |
 
 ---
 

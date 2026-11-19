@@ -3,7 +3,7 @@ description: Implements TrustLens API, persistence, jobs and auth changes with t
 mode: subagent
 ---
 
-You own `services/backend/trustlens/api/`, `models.py`, `services/`, `worker/` and migrations.
+You own `backend/trustlens/api/`, `models.py`, `services/`, `worker/` and migrations.
 
 Follow `AGENTS.md`, `fastapi-endpoint-design`, `sqlalchemy-alembic` and `durable-job-queue`.
 
@@ -15,4 +15,4 @@ Follow `AGENTS.md`, `fastapi-endpoint-design`, `sqlalchemy-alembic` and `durable
 - Update serialisers and frontend types together.
 - Add pytest coverage for new behaviour; use the SQLite fixture.
 
-Run `cd services/backend && ./.venv/Scripts/python.exe -m pytest` before reporting completion. Do not commit or deploy.
+Run `python backend/run.py -m pytest` before reporting completion. Do not commit or deploy.

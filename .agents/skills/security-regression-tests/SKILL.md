@@ -16,7 +16,7 @@ Where to add:
 - Ownership, automation, reports, input limits: `tests/test_api_pipeline.py`
 - Retries/leases: `tests/test_worker_ai.py`
 - AI citation/fallback: `tests/test_worker_ai.py`
-- Registry: `contracts/test/ReportRegistry.ts`
+- Registry: `backend/contracts/test/ReportRegistry.ts`
 
 Rules:
 

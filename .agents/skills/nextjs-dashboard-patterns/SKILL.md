@@ -19,4 +19,4 @@ Rules:
 - Keep TypeScript strict and sync shared types with backend serialisers.
 - Avoid adding state libraries; small hooks/effects are sufficient.
 
-Verify: `pnpm --dir apps/web typecheck && pnpm --dir apps/web test && pnpm --dir apps/web build`.
+Verify: `cd frontend && pnpm typecheck && pnpm test && pnpm build`.

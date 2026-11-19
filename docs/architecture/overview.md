@@ -7,7 +7,7 @@ TrustLens is one product with three runnable parts:
 ```text
 ┌──────────────────────────┐        /api/* rewrite        ┌─────────────────────────────┐
 │ Next.js dashboard        │ ───────────────────────────▶ │ FastAPI API + worker        │
-│ apps/web (port 3000)     │                              │ services/backend (port 8000)│
+│ frontend (port 3000)     │                              │ backend (port 8000)         │
 └──────────────────────────┘                              └──────────────┬──────────────┘
                                                                          │
                         ┌────────────────────────────────────────────────┼──────────────────────────┐
@@ -21,7 +21,7 @@ TrustLens is one product with three runnable parts:
                                      (validated, never decisive)
 ```
 
-The browser never talks to the database or chain directly. Next.js proxies `/api/*` to the FastAPI service so session cookies remain first-party on the dashboard origin. In production, Vercel rewrites to Render; locally, it rewrites to `127.0.0.1:8000`.
+The browser never talks to the database or chain directly. By default Next.js proxies `/api/*` to the FastAPI service so session cookies remain first-party on the dashboard origin. In production, Vercel rewrites to Render; locally, it rewrites to `127.0.0.1:8000`. Alternatively, set `NEXT_PUBLIC_API_BASE_URL` for direct cross-origin calls and allow the frontend origin in the backend `CORS_ORIGINS`.
 
 ## Request lifecycle
 

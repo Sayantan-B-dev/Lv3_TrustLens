@@ -5,30 +5,29 @@ Use local services. Do not rely on the demo succeeding against arbitrary live si
 ## Before the demo
 
 ```bash
-pnpm install
-cd services/backend
-python -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r requirements.txt
-cd ../..
-cp .env.example .env
-cd services/backend && ./.venv/Scripts/python.exe -m alembic upgrade head
-./.venv/Scripts/python.exe -m uvicorn trustlens.main:app --reload --port 8000
+# First time only
+python -m venv backend/.venv
+backend/.venv/Scripts/python -m pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env
+
+# Terminal 1
+python backend/run.py
 ```
 
 Second terminal:
 
 ```bash
-pnpm --dir apps/web dev
+cd frontend && pnpm install && pnpm dev
 ```
 
 Open http://localhost:3000. Confirm the header shows the engine online and no red error banner.
 
-Optional chain (third/fourth terminals):
+Optional chain (separate terminals):
 
 ```bash
-pnpm --dir contracts node
-pnpm --dir contracts deploy:local
-# set CHAIN_CONTRACT_ADDRESS in .env and restart the API
+cd backend/contracts && pnpm node
+cd backend/contracts && pnpm deploy:local
+# set CHAIN_CONTRACT_ADDRESS in backend/.env and restart the API
 ```
 
 ## Script
@@ -84,7 +83,7 @@ with a gift card. Verify at https://bank-secure-login.example/verify before midn
 
 ## Reset demo data
 
-Stop the API and delete `services/backend/trustlens.db` (SQLite) or drop/recreate the PostgreSQL schema and rerun `alembic upgrade head`. Deleting the local database is destructive; only do it in a demo environment.
+Stop the API and delete `backend/trustlens.db` (SQLite) or drop/recreate the PostgreSQL schema and rerun `python backend/run.py -m alembic upgrade head`. Deleting the local database is destructive; only do it in a demo environment.
 
 ## If something fails
 

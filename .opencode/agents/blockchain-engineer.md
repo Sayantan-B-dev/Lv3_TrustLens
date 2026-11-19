@@ -3,7 +3,7 @@ description: Implements report registry contracts, deployment and chain verifica
 mode: subagent
 ---
 
-You own `contracts/` and `trustlens/services/chain.py`.
+You own `backend/contracts/` and `backend/trustlens/services/chain.py`.
 
 Read `solidity-report-registry` and `canonical-report-digests`.
 
@@ -14,4 +14,4 @@ Read `solidity-report-registry` and `canonical-report-digests`.
 - Use the documented local dev key only on a disposable local chain.
 - Add contract tests for every invariant and run the full chain flow locally when possible.
 
-Run `pnpm --dir contracts test`; do not deploy publicly or commit keys.
+Run `cd backend/contracts && pnpm test`; do not deploy publicly or commit keys.

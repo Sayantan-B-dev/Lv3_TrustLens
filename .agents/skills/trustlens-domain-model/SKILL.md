@@ -5,7 +5,7 @@ description: Use when changing TrustLens database entities, ownership, investiga
 
 # TrustLens domain model
 
-Core entities live in `services/backend/trustlens/models.py`.
+Core entities live in `backend/trustlens/models.py`.
 
 - `Principal` is either an anonymous session or a Google user. Ownership is stored as `owner_kind` + `owner_id` on investigations.
 - Investigation statuses: `draft`, `queued`, `running`, `completed`, `failed`.
@@ -20,6 +20,6 @@ Rules:
 - Enforce ownership through `api/deps.py`; unauthorised IDs return 404.
 - Do not store raw message bodies in reports or chain data.
 - When adding a column, update the SQLAlchemy model **and** add an Alembic revision; never edit an applied migration.
-- Update API serialisers and `apps/web/lib/types.ts` together.
+- Update API serialisers and `frontend/lib/types.ts` together.
 
-Verify: `cd services/backend && ./.venv/Scripts/python.exe -m pytest` and `alembic upgrade head` on a scratch DB.
+Verify: `python backend/run.py -m pytest` and `python backend/run.py -m alembic upgrade head` on a scratch DB.
