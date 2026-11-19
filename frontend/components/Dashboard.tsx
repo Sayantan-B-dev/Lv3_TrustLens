@@ -173,11 +173,20 @@ export default function Dashboard() {
     };
   }, [detail?.id, detail?.status, refreshHistory, refreshStatus]);
 
-  const enabledChecks = useMemo(() => {
-    if (!automation) return undefined;
-    const keys = Object.keys(automation.modules).filter((key) => automation.modules[key] !== false);
-    return keys.length > 0 ? keys : undefined;
-  }, [automation]);
+  const checksFor = useCallback(
+    (inputType: "url" | "message") => {
+      if (!automation) return undefined;
+      const keys = Object.keys(automation.modules).filter(
+        (key) =>
+          automation.modules[key] !== false &&
+          (key !== "message.heuristics" || inputType === "message"),
+      );
+      return keys.length > 0 ? keys : undefined;
+    },
+    [automation],
+  );
+
+  const enabledChecks = useMemo(() => checksFor(tab), [checksFor, tab]);
 
   const handleSubmit = async () => {
     if (!automation) {
@@ -250,7 +259,7 @@ export default function Dashboard() {
     setActionBusy("run");
     setError(null);
     try {
-      await api.run(detail.id, enabledChecks);
+      await api.run(detail.id, checksFor(detail.input_type));
       setDetail({ ...detail, status: "queued", error: null });
       toast("Investigation queued. Evidence will appear as checks complete.", "success");
     } catch (caught) {

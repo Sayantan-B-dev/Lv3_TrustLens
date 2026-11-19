@@ -40,6 +40,8 @@ reports/
 
 # Database files (never commit real databases)
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
