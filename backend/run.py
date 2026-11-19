@@ -6,7 +6,6 @@ Default (no arguments) starts the API with reload on port 8000:
 
 Other examples:
     python backend/run.py -m pytest
-    python backend/run.py -m alembic upgrade head
 """
 
 from __future__ import annotations
