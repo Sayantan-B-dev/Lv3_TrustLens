@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from ..ai.explain import explain
 from ..config import Settings
@@ -38,7 +38,7 @@ from ..intelligence.risk import (
     assess,
 )
 from ..intelligence.tls import analyse_tls
-from ..models import CheckResult, Indicator, Investigation, utcnow
+from ..models import utcnow
 from ..security.canonical import sha256_hex
 from ..security.redaction import mask_email, mask_phone, safe_error
 
@@ -591,44 +591,45 @@ def _risk_findings(outcomes: list[Outcome]) -> list[RiskFinding]:
     return findings
 
 
-def _persist(session: Session, investigation: Investigation, outcomes: list[Outcome], indicators: list[dict]) -> None:
-    session.query(CheckResult).filter(CheckResult.investigation_id == investigation.id).delete()
-    session.query(Indicator).filter(Indicator.investigation_id == investigation.id).delete()
-    for outcome in outcomes:
-        session.add(
-            CheckResult(
-                investigation_id=investigation.id,
-                check_id=outcome.check_id[:80],
-                category=outcome.category[:40],
-                status=outcome.status[:24],
-                severity=outcome.severity[:16],
-                title=outcome.title[:200],
-                summary=outcome.summary or "",
-                evidence={**(outcome.evidence or {}), "findings": outcome.findings or []},
-                source=outcome.source[:120],
-                source_timestamp=outcome.source_timestamp,
-                limitations=outcome.limitations or [],
-                impact=outcome.impact,
-                remediation=outcome.remediation,
-                duration_ms=outcome.duration_ms,
-            )
-        )
-    for item in indicators:
-        session.add(
-            Indicator(
-                investigation_id=investigation.id,
-                type=item["type"],
-                value=item["value"],
-                normalized_value=item["normalized_value"],
-                confidence=item["confidence"],
-                provenance=item["provenance"],
-            )
-        )
+def _persisted_children(outcomes: list[Outcome], indicators: list[dict]) -> tuple[list[dict], list[dict]]:
+    created_at = utcnow()
+    checks = [
+        {
+            "id": index,
+            "check_id": outcome.check_id[:80],
+            "category": outcome.category[:40],
+            "status": outcome.status[:24],
+            "severity": outcome.severity[:16],
+            "title": outcome.title[:200],
+            "summary": outcome.summary or "",
+            "evidence": {**(outcome.evidence or {}), "findings": outcome.findings or []},
+            "source": outcome.source[:120],
+            "source_timestamp": outcome.source_timestamp,
+            "limitations": outcome.limitations or [],
+            "impact": outcome.impact,
+            "remediation": outcome.remediation,
+            "duration_ms": outcome.duration_ms,
+            "created_at": created_at,
+        }
+        for index, outcome in enumerate(outcomes, start=1)
+    ]
+    indicator_docs = [
+        {
+            "type": item["type"],
+            "value": item["value"],
+            "normalized_value": item["normalized_value"],
+            "confidence": item["confidence"],
+            "provenance": item["provenance"],
+            "created_at": created_at,
+        }
+        for item in indicators
+    ]
+    return checks, indicator_docs
 
 
 def _finalise(
-    session: Session,
-    investigation: Investigation,
+    db: Database,
+    investigation: dict,
     outcomes: list[Outcome],
     indicators: list[dict],
     settings: Settings,
@@ -689,21 +690,6 @@ def _finalise(
         + (f" Key evidence: {'; '.join(f.title for f in top_findings)}." if top_findings else "")
     )
 
-    investigation.risk_classification = risk.classification
-    investigation.score = risk.score
-    investigation.confidence = risk.confidence
-    investigation.coverage = risk.coverage
-    investigation.ruleset_version = RULESET_VERSION
-    investigation.summary = summary[:2000]
-    investigation.ai_provider = explanation.provider
-    investigation.ai_model = explanation.model
-    investigation.ai_used = explanation.used
-    investigation.checks_total = len(assessable)
-    investigation.checks_completed = len(completed)
-    investigation.status = "completed"
-    investigation.completed_at = utcnow()
-    investigation.error = None
-
     # Risk evidence is stored on the risk outcome for transparent scoring.
     outcomes.insert(
         0,
@@ -721,27 +707,50 @@ def _finalise(
             findings=[],
         ),
     )
-    _persist(session, investigation, outcomes, indicators)
-    session.commit()
+
+    checks, indicator_docs = _persisted_children(outcomes, indicators)
+    update = {
+        "risk_classification": risk.classification,
+        "score": risk.score,
+        "confidence": risk.confidence,
+        "coverage": risk.coverage,
+        "ruleset_version": RULESET_VERSION,
+        "summary": summary[:2000],
+        "ai_provider": explanation.provider,
+        "ai_model": explanation.model,
+        "ai_used": explanation.used,
+        "checks_total": len(assessable),
+        "checks_completed": len(completed),
+        "status": "completed",
+        "completed_at": utcnow(),
+        "error": None,
+        "checks": checks,
+        "indicators": indicator_docs,
+    }
+    db.investigations.update_one({"_id": investigation["_id"]}, {"$set": update})
+    investigation.update(update)
 
 
-def run_pipeline(session: Session, investigation: Investigation, settings: Settings) -> Investigation:
-    investigation.status = "running"
-    investigation.started_at = utcnow()
-    investigation.error = None
-    session.commit()
+def run_pipeline(db: Database, investigation: dict, settings: Settings) -> dict:
+    db.investigations.update_one(
+        {"_id": investigation["_id"]},
+        {"$set": {"status": "running", "started_at": utcnow(), "error": None}},
+    )
+    investigation.update({"status": "running", "started_at": utcnow(), "error": None})
 
     requested = {
-        check for check in (investigation.checks_requested or []) if isinstance(check, str)
-    } or set(default_checks(investigation.input_type))
+        check
+        for check in (investigation.get("checks_requested") or [])
+        if isinstance(check, str)
+    } or set(default_checks(investigation.get("input_type", "url")))
 
     outcomes: list[Outcome] = []
     indicators: list[dict] = []
 
-    if investigation.input_type == "message":
+    if investigation.get("input_type") == "message":
         started = time.monotonic()
         try:
-            message_result = analyse_message(investigation.input_value)
+            message_result = analyse_message(investigation.get("input_value") or "")
             indicators.extend(message_result.get("indicators", []))
             if "message.heuristics" in requested:
                 outcomes.append(
@@ -783,7 +792,7 @@ def run_pipeline(session: Session, investigation: Investigation, settings: Setti
     else:
         try:
             url_outcomes, url_indicators = _analyse_url(
-                investigation.input_value,
+                investigation.get("input_value") or "",
                 suffix="",
                 requested=requested,
                 settings=settings,
@@ -798,7 +807,7 @@ def run_pipeline(session: Session, investigation: Investigation, settings: Setti
     if "correlation" in requested:
         started = time.monotonic()
         try:
-            correlation_result = correlate(session, investigation.id, prepared_indicators)
+            correlation_result = correlate(db, investigation["_id"], prepared_indicators)
             outcomes.append(
                 _outcome(
                     check_id="correlation",
@@ -825,26 +834,26 @@ def run_pipeline(session: Session, investigation: Investigation, settings: Setti
 
     target = (
         "pasted message"
-        if investigation.input_type == "message"
-        else investigation.display_value
+        if investigation.get("input_type") == "message"
+        else investigation.get("display_value")
     )
     _finalise(
-        session,
+        db,
         investigation,
         outcomes,
         prepared_indicators,
         settings,
-        input_type=investigation.input_type,
+        input_type=investigation.get("input_type", "url"),
         target=target,
         ai_enabled="ai" in requested,
     )
     return investigation
 
 
-def coverage_snapshot(investigation: Investigation) -> dict:
+def coverage_snapshot(investigation: dict) -> dict:
     return {
-        "checks_total": investigation.checks_total,
-        "checks_completed": investigation.checks_completed,
-        "coverage": investigation.coverage,
-        "confidence": investigation.confidence,
+        "checks_total": investigation.get("checks_total", 0),
+        "checks_completed": investigation.get("checks_completed", 0),
+        "coverage": investigation.get("coverage"),
+        "confidence": investigation.get("confidence"),
     }

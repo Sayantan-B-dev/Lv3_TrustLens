@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from ..config import Settings, get_settings
 from ..db import get_db
 from ..intelligence.pipeline import CHECK_CATALOG, DEFAULT_CHECKS
 from ..intelligence.risk import RISK_CLASSES, RISK_DEFINITIONS
-from ..models import RuleVersion, WorkerHeartbeat, utcnow
+from ..models import utcnow
 from ..services.jobs import queue_depth
 
 router = APIRouter(tags=["system"])
@@ -20,32 +19,30 @@ router = APIRouter(tags=["system"])
 
 @router.get("/system/status")
 def status(
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    heartbeat = db.get(WorkerHeartbeat, settings.worker_name)
+    heartbeat = db.worker_heartbeats.find_one({"_id": settings.worker_name})
     heartbeat_age = None
     worker_online = False
-    if heartbeat is not None and heartbeat.last_seen_at is not None:
-        last_seen = heartbeat.last_seen_at
+    if heartbeat is not None and heartbeat.get("last_seen_at") is not None:
+        last_seen = heartbeat["last_seen_at"]
         if last_seen.tzinfo is None:
-            from datetime import timezone
-
             last_seen = last_seen.replace(tzinfo=timezone.utc)
         heartbeat_age = int((utcnow() - last_seen).total_seconds())
         worker_online = heartbeat_age <= max(45, int(settings.worker_poll_seconds * 4))
 
-    rule = db.get(RuleVersion, "trustlens-rules-v1")
+    rule = db.rule_versions.find_one({"_id": "trustlens-rules-v1"})
     return {
         "app": settings.app_name,
         "environment": settings.environment,
-        "database": db.bind.dialect.name,
+        "database": "mongodb",
         "worker": {
             "enabled": settings.worker_enabled,
             "online": worker_online,
-            "status": heartbeat.status if heartbeat else "not_started",
+            "status": heartbeat.get("status") if heartbeat else "not_started",
             "last_seen_seconds_ago": heartbeat_age,
-            "processed_count": heartbeat.processed_count if heartbeat else 0,
+            "processed_count": heartbeat.get("processed_count", 0) if heartbeat else 0,
         },
         "queue": queue_depth(db),
         "providers": {
@@ -66,8 +63,8 @@ def status(
             },
         },
         "ruleset": {
-            "version": rule.version if rule else "trustlens-rules-v1",
-            "active": bool(rule.active) if rule else True,
+            "version": rule["_id"] if rule else "trustlens-rules-v1",
+            "active": bool(rule.get("active", True)) if rule else True,
         },
         "limits": {
             "max_input_chars": settings.max_input_chars,
@@ -102,6 +99,6 @@ def meta():
 
 
 @router.get("/debug/db")
-def debug_db(db: Session = Depends(get_db)):  # intentionally minimal; no secrets
-    db.execute(text("SELECT 1"))
-    return {"database": db.bind.dialect.name, "ok": True}
+def debug_db(db: Database = Depends(get_db)):  # intentionally minimal; no secrets
+    db.command("ping")
+    return {"database": "mongodb", "ok": True}

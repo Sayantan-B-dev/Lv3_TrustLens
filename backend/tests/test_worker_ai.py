@@ -8,10 +8,10 @@ from fastapi.testclient import TestClient
 from trustlens.ai.explain import explain
 from trustlens.ai.provider import ProviderResult
 from trustlens.config import get_settings
-from trustlens.db import SessionLocal
+from trustlens.db import database
 from trustlens.intelligence.pipeline import Outcome
 from trustlens.intelligence.risk import assess
-from trustlens.models import Job, Investigation, utcnow
+from trustlens.models import utcnow
 from trustlens.services.jobs import recover_expired_leases
 import trustlens.worker.runner as runner
 
@@ -47,43 +47,59 @@ def test_failed_job_retries_with_bounded_backoff(client: TestClient, monkeypatch
     monkeypatch.setattr(runner, "run_pipeline", boom)
     assert runner.process_one() is False
 
-    with SessionLocal() as session:
-        job = session.query(Job).filter(Job.investigation_id == investigation_id).one()
-        assert job.status == "queued"
-        assert job.attempts == 1
-        assert job.available_at.replace(tzinfo=None) > utcnow().replace(tzinfo=None)
-        assert job.last_error
-        investigation = session.get(Investigation, investigation_id)
-        assert investigation.status == "queued"
+    job = database.jobs.find_one({"investigation_id": investigation_id})
+    assert job is not None
+    assert job["status"] == "queued"
+    assert job["attempts"] == 1
+    assert job["available_at"].replace(tzinfo=None) > utcnow().replace(tzinfo=None)
+    assert job["last_error"]
+    investigation = database.investigations.find_one({"_id": investigation_id})
+    assert investigation is not None
+    assert investigation["status"] == "queued"
 
 
 def test_expired_lease_is_recovered(client: TestClient) -> None:
     investigation_id = create_queued_job(client)
-    with SessionLocal() as session:
-        job = session.query(Job).filter(Job.investigation_id == investigation_id).one()
-        job.status = "running"
-        job.attempts = 1
-        job.lease_expires_at = utcnow() - timedelta(minutes=5)
-        session.commit()
-        assert recover_expired_leases(session, get_settings()) == 1
-        session.refresh(job)
-        assert job.status == "queued"
-        assert job.lease_expires_at is None
+    job = database.jobs.find_one({"investigation_id": investigation_id})
+    assert job is not None
+    database.jobs.update_one(
+        {"_id": job["_id"]},
+        {
+            "$set": {
+                "status": "running",
+                "attempts": 1,
+                "lease_expires_at": utcnow() - timedelta(minutes=5),
+            }
+        },
+    )
+    assert recover_expired_leases(database, get_settings()) == 1
+    job = database.jobs.find_one({"_id": job["_id"]})
+    assert job is not None
+    assert job["status"] == "queued"
+    assert job["lease_expires_at"] is None
 
 
 def test_expired_lease_after_max_attempts_fails_the_investigation(client: TestClient) -> None:
     investigation_id = create_queued_job(client)
-    with SessionLocal() as session:
-        job = session.query(Job).filter(Job.investigation_id == investigation_id).one()
-        job.status = "running"
-        job.attempts = job.max_attempts
-        job.lease_expires_at = utcnow() - timedelta(minutes=5)
-        session.commit()
-        recover_expired_leases(session, get_settings())
-        session.refresh(job)
-        assert job.status == "failed"
-        investigation = session.get(Investigation, investigation_id)
-        assert investigation.status == "failed"
+    job = database.jobs.find_one({"investigation_id": investigation_id})
+    assert job is not None
+    database.jobs.update_one(
+        {"_id": job["_id"]},
+        {
+            "$set": {
+                "status": "running",
+                "attempts": job["max_attempts"],
+                "lease_expires_at": utcnow() - timedelta(minutes=5),
+            }
+        },
+    )
+    recover_expired_leases(database, get_settings())
+    job = database.jobs.find_one({"_id": job["_id"]})
+    assert job is not None
+    assert job["status"] == "failed"
+    investigation = database.investigations.find_one({"_id": investigation_id})
+    assert investigation is not None
+    assert investigation["status"] == "failed"
 
 
 class BadProvider:

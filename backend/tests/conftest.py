@@ -7,13 +7,8 @@ import sys
 BACKEND_DIR = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-TEST_DB = BACKEND_DIR / "test_trustlens.db"
-for suffix in ("", "-wal", "-shm"):
-    candidate = pathlib.Path(str(TEST_DB) + suffix)
-    if candidate.exists():
-        candidate.unlink()
-
-os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{TEST_DB.as_posix()}"
+os.environ["MONGODB_URL"] = "mongomock://local"
+os.environ["MONGODB_DB"] = "trustlens_test"
 os.environ["WORKER_ENABLED"] = "false"
 os.environ["AUTO_CREATE_SCHEMA"] = "true"
 os.environ["AI_PROVIDER"] = "deterministic"
@@ -31,22 +26,21 @@ from trustlens.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
 
-from trustlens.db import Base, SessionLocal, engine  # noqa: E402
+from trustlens.db import database, init_db, reset_database  # noqa: E402
 from trustlens.main import app  # noqa: E402
 
 
 @pytest.fixture()
 def client():
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+    reset_database()
+    init_db()
     with TestClient(app) as test_client:
         yield test_client
 
 
 @pytest.fixture()
 def db():
-    with SessionLocal() as session:
-        yield session
+    yield database
 
 
 @pytest.fixture()

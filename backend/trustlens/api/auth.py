@@ -8,12 +8,12 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
 from ..config import Settings, get_settings
 from ..db import get_db
-from ..models import User, utcnow
+from ..models import new_user, utcnow
 from ..security.redaction import safe_error
 from .deps import (
     OAUTH_STATE_COOKIE,
@@ -78,7 +78,7 @@ def google_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
     frontend = settings.frontend_url.rstrip("/")
@@ -122,26 +122,35 @@ def google_callback(
     if not subject:
         return RedirectResponse(f"{frontend}/?auth=error&reason=no_subject", status_code=302)
 
-    user = db.execute(
-        select(User).where(User.provider == "google", User.subject == subject)
-    ).scalar_one_or_none()
+    user = db.users.find_one({"provider": "google", "subject": subject})
     if user is None:
-        user = User(
+        user = new_user(
             provider="google",
             subject=subject,
             email=info.get("email"),
             name=info.get("name"),
         )
-        db.add(user)
+        try:
+            db.users.insert_one(user)
+        except DuplicateKeyError:
+            user = db.users.find_one({"provider": "google", "subject": subject})
     else:
-        user.email = info.get("email") or user.email
-        user.name = info.get("name") or user.name
-        user.last_seen_at = utcnow()
-    db.commit()
-    db.refresh(user)
+        db.users.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "email": info.get("email") or user.get("email"),
+                    "name": info.get("name") or user.get("name"),
+                    "last_seen_at": utcnow(),
+                }
+            },
+        )
+
+    if user is None:  # pragma: no cover - only if a concurrent insert vanished
+        return RedirectResponse(f"{frontend}/?auth=error&reason=no_user", status_code=302)
 
     redirect = RedirectResponse(f"{frontend}/?auth=ok", status_code=302)
-    set_user_cookie(redirect, user.id, settings)
+    set_user_cookie(redirect, user["_id"], settings)
     redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
     return redirect
 

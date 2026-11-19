@@ -31,10 +31,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # --- database --------------------------------------------------------
-    # SQLite is the credential-free local default. Set a PostgreSQL URL
-    # (local or Neon) for production: postgresql+psycopg://user:pass@host/db
-    database_url: str = "sqlite+pysqlite:///./trustlens.db"
-    direct_database_url: str = ""
+    # Local-first MongoDB. Point MONGODB_URL at any local or shared cluster;
+    # MONGODB_DB stays dedicated so TrustLens never collides with other apps.
+    mongodb_url: str = "mongodb://127.0.0.1:27017"
+    mongodb_db: str = "trustlens"
+    mongodb_timeout_ms: int = 5000
     auto_create_schema: bool = True
     seed_demo_data: bool = False
 

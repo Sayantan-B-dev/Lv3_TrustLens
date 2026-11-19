@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy.orm import Session
+from pymongo import ReturnDocument
+from pymongo.database import Database
 
 from ..intelligence.risk import RISK_DEFINITIONS
-from ..models import CheckResult, Indicator, Investigation, ThreatReport
+from ..models import new_report
 from ..security.canonical import CANONICAL_VERSION, report_digest, report_ref_hex, sha256_hex
 from ..security.redaction import mask_email, mask_phone
 
@@ -21,104 +22,98 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def build_report_payload(
-    session: Session,
-    investigation: Investigation,
+    investigation: dict,
     *,
     version: int = 1,
 ) -> dict:
-    checks = (
-        session.query(CheckResult)
-        .filter(CheckResult.investigation_id == investigation.id)
-        .order_by(CheckResult.id)
-        .all()
+    checks = sorted(
+        investigation.get("checks") or [],
+        key=lambda item: item.get("id", 0),
     )
-    indicators = (
-        session.query(Indicator)
-        .filter(Indicator.investigation_id == investigation.id)
-        .order_by(Indicator.id)
-        .all()
-    )
+    indicators = list(investigation.get("indicators") or [])
 
     findings = []
     for check in checks:
-        if check.check_id in {"risk.assessment", "ai.explanation"}:
+        if check.get("check_id") in {"risk.assessment", "ai.explanation"}:
             continue
         findings.append(
             {
-                "check_id": check.check_id,
-                "category": check.category,
-                "status": check.status,
-                "severity": check.severity,
-                "title": check.title,
-                "summary": (check.summary or "")[:400],
+                "check_id": check.get("check_id"),
+                "category": check.get("category"),
+                "status": check.get("status"),
+                "severity": check.get("severity"),
+                "title": check.get("title"),
+                "summary": (check.get("summary") or "")[:400],
             }
         )
 
     indicator_payload = []
     for indicator in indicators:
-        value = indicator.value
-        if indicator.type == "email":
+        value = indicator.get("value") or ""
+        if indicator.get("type") == "email":
             value = mask_email(value)
-        elif indicator.type == "phone":
+        elif indicator.get("type") == "phone":
             value = mask_phone(value)
         indicator_payload.append(
             {
-                "type": indicator.type,
+                "type": indicator.get("type"),
                 "value": value[:200],
-                "digest": sha256_hex(indicator.normalized_value)[:32],
-                "confidence": round(indicator.confidence, 2),
+                "digest": sha256_hex(indicator.get("normalized_value") or "")[:32],
+                "confidence": round(indicator.get("confidence") or 0.0, 2),
             }
         )
 
     return {
         "schema": CANONICAL_VERSION,
         "report_version": version,
-        "investigation_id": investigation.id,
-        "input_type": investigation.input_type,
-        "target": investigation.display_value,
-        "risk_classification": investigation.risk_classification,
+        "investigation_id": investigation.get("_id"),
+        "input_type": investigation.get("input_type"),
+        "target": investigation.get("display_value"),
+        "risk_classification": investigation.get("risk_classification"),
         "risk_definition": RISK_DEFINITIONS.get(
-            investigation.risk_classification or "Inconclusive", ""
+            investigation.get("risk_classification") or "Inconclusive", ""
         ),
-        "score": investigation.score,
-        "confidence": investigation.confidence,
-        "coverage": investigation.coverage,
-        "ruleset_version": investigation.ruleset_version,
+        "score": investigation.get("score", 0),
+        "confidence": investigation.get("confidence"),
+        "coverage": investigation.get("coverage"),
+        "ruleset_version": investigation.get("ruleset_version"),
         "checks": findings,
         "indicators": indicator_payload,
-        "created_at": _iso(investigation.created_at),
-        "completed_at": _iso(investigation.completed_at),
+        "created_at": _iso(investigation.get("created_at")),
+        "completed_at": _iso(investigation.get("completed_at")),
         "limitations": "TrustLens performs passive checks only. Report integrity does not prove that the findings are true.",
     }
 
 
 def create_report(
-    session: Session,
-    investigation: Investigation,
+    db: Database,
+    investigation: dict,
     *,
     submitter_kind: str,
     submitter_id: str,
-) -> ThreatReport:
-    version = (
-        session.query(ThreatReport)
-        .filter(ThreatReport.investigation_id == investigation.id)
-        .count()
-        + 1
+) -> dict:
+    sequence = db.investigations.find_one_and_update(
+        {"_id": investigation["_id"]},
+        {"$inc": {"report_seq": 1}},
+        projection={"report_seq": 1},
+        return_document=ReturnDocument.AFTER,
     )
-    payload = build_report_payload(session, investigation, version=version)
-    digest = report_digest(payload)
-    report = ThreatReport(
-        investigation_id=investigation.id,
+    if sequence is None:  # pragma: no cover - investigation was deleted concurrently
+        raise RuntimeError("Investigation no longer exists.")
+    version = int(sequence.get("report_seq") or 1)
+    payload = build_report_payload(investigation, version=version)
+    report = new_report(
+        investigation_id=investigation["_id"],
         submitter_kind=submitter_kind,
         submitter_id=submitter_id,
         version=version,
         canonical_version=CANONICAL_VERSION,
         payload=payload,
-        digest=digest,
-        report_ref=report_ref_hex(investigation.id, version),
-        status="created",
+        digest=report_digest(payload),
+        report_ref=report_ref_hex(investigation["_id"], version),
     )
-    session.add(report)
-    session.commit()
-    session.refresh(report)
+    db.investigations.update_one(
+        {"_id": investigation["_id"]},
+        {"$push": {"reports": report}},
+    )
     return report

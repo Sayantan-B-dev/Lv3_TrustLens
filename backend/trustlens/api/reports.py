@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 
 from ..config import Settings, get_settings
 from ..db import get_db
-from ..models import ThreatReport, utcnow
+from ..models import utcnow
 from ..security.canonical import report_digest
 from ..security.redaction import safe_error
 from ..services import chain
+from ..services.reports import build_report_payload, create_report
 from .deps import Principal, audit, get_principal, owned_investigation
 from .serializers import serialize_report
 
@@ -25,42 +25,56 @@ class CreateReportIn(BaseModel):
     investigation_id: str
 
 
-def _owned_report(db: Session, principal: Principal, report_id: str) -> ThreatReport:
-    report = db.get(ThreatReport, report_id)
-    if report is None:
-        raise HTTPException(status_code=404, detail="Threat report not found.")
-    investigation = report.investigation
+def _owned_report(db: Database, principal: Principal, report_id: str) -> tuple[dict, dict]:
+    investigation = db.investigations.find_one({"reports.id": report_id})
     if (
         investigation is None
-        or investigation.owner_kind != principal.kind
-        or investigation.owner_id != principal.id
+        or investigation.get("owner_kind") != principal.kind
+        or investigation.get("owner_id") != principal.id
     ):
         raise HTTPException(status_code=404, detail="Threat report not found.")
-    return report
+    report = next(
+        (item for item in investigation.get("reports") or [] if item.get("id") == report_id),
+        None,
+    )
+    if report is None:  # pragma: no cover - defensive
+        raise HTTPException(status_code=404, detail="Threat report not found.")
+    return investigation, report
+
+
+def _update_report(
+    db: Database, investigation_id: str, report: dict, updates: dict
+) -> None:
+    if not updates:
+        return
+    db.investigations.update_one(
+        {"_id": investigation_id, "reports.id": report["id"]},
+        {"$set": {f"reports.$.{key}": value for key, value in updates.items()}},
+    )
+    report.update(updates)
 
 
 @router.post("", status_code=201)
 def create(
     payload: CreateReportIn,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     investigation = owned_investigation(db, principal, payload.investigation_id)
-    if investigation.status != "completed" or not investigation.risk_classification:
+    if investigation.get("status") != "completed" or not investigation.get("risk_classification"):
         raise HTTPException(
             status_code=409,
             detail="Complete the investigation before publishing a report.",
         )
-    latest = db.execute(
-        select(ThreatReport)
-        .where(ThreatReport.investigation_id == investigation.id)
-        .order_by(ThreatReport.created_at.desc())
-    ).scalars().first()
-    if latest is not None and latest.status in {"created", "committed", "verified"}:
+    latest = max(
+        investigation.get("reports") or [],
+        key=lambda item: item.get("created_at") or utcnow(),
+        default=None,
+    )
+    if latest is not None and latest.get("status") in {"created", "committed", "verified"}:
         # Idempotent: reuse the existing unrevised commitment.
-        if serialize_report(latest)["digest"] == report_digest(latest.payload):
+        if latest.get("digest") == report_digest(latest.get("payload") or {}):
             return serialize_report(latest, include_payload=True)
-    from ..services.reports import create_report
 
     report = create_report(
         db,
@@ -72,8 +86,8 @@ def create(
         db,
         principal,
         "threat_report.created",
-        target=report.id,
-        detail={"digest": report.digest, "investigation_id": investigation.id},
+        target=report["id"],
+        detail={"digest": report["digest"], "investigation_id": investigation["_id"]},
     )
     return serialize_report(report, include_payload=True)
 
@@ -81,49 +95,51 @@ def create(
 @router.get("/{report_id}")
 def detail(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
-    report = _owned_report(db, principal, report_id)
+    _investigation, report = _owned_report(db, principal, report_id)
     return serialize_report(report, include_payload=True)
 
 
 @router.post("/{report_id}/commit")
 def commit(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
     settings: Settings = Depends(get_settings),
 ):
-    report = _owned_report(db, principal, report_id)
+    investigation, report = _owned_report(db, principal, report_id)
     if not settings.chain_configured:
         raise HTTPException(
             status_code=409,
             detail="The blockchain registry is not configured. Deploy it locally and set CHAIN_CONTRACT_ADDRESS.",
         )
-    if report.status in {"committed", "verified"} and report.tx_hash:
+    if report.get("status") in {"committed", "verified"} and report.get("tx_hash"):
         return serialize_report(report)
     try:
-        result = chain.commit_digest(report.report_ref, report.digest, settings)
+        result = chain.commit_digest(report["report_ref"], report["digest"], settings)
     except chain.ChainError as exc:
-        report.last_error = safe_error(exc, 300)
-        db.commit()
-        raise HTTPException(status_code=502, detail=report.last_error) from exc
+        message = safe_error(exc, 300)
+        _update_report(db, investigation["_id"], report, {"last_error": message})
+        raise HTTPException(status_code=502, detail=message) from exc
 
-    report.tx_hash = result["tx_hash"]
-    report.block_number = result["block_number"]
-    report.chain_id = result["chain_id"]
-    report.contract_address = result["contract_address"]
-    report.status = "committed"
-    report.committed_at = utcnow()
-    report.last_error = None
-    db.commit()
+    updates = {
+        "tx_hash": result["tx_hash"],
+        "block_number": result["block_number"],
+        "chain_id": result["chain_id"],
+        "contract_address": result["contract_address"],
+        "status": "committed",
+        "committed_at": utcnow(),
+        "last_error": None,
+    }
+    _update_report(db, investigation["_id"], report, updates)
     audit(
         db,
         principal,
         "threat_report.committed",
-        target=report.id,
-        detail={"tx_hash": report.tx_hash, "chain_id": report.chain_id},
+        target=report["id"],
+        detail={"tx_hash": report["tx_hash"], "chain_id": report["chain_id"]},
     )
     return serialize_report(report)
 
@@ -131,22 +147,21 @@ def commit(
 @router.post("/{report_id}/verify")
 def verify(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
     settings: Settings = Depends(get_settings),
 ):
-    report = _owned_report(db, principal, report_id)
-    recomputed = report_digest(report.payload)
-    digest_consistent = recomputed == report.digest
-    chain_result = chain.verify_digest(report.report_ref, report.digest, settings)
+    investigation, report = _owned_report(db, principal, report_id)
+    recomputed = report_digest(report.get("payload") or {})
+    digest_consistent = recomputed == report.get("digest")
+    chain_result = chain.verify_digest(report["report_ref"], report["digest"], settings)
     if chain_result.get("status") == "verified" and digest_consistent:
-        report.status = "verified"
-        db.commit()
+        _update_report(db, investigation["_id"], report, {"status": "verified"})
     return {
         "report": serialize_report(report),
         "digest_consistent": digest_consistent,
         "recomputed_digest": recomputed,
-        "stored_digest": report.digest,
+        "stored_digest": report.get("digest"),
         "chain": chain_result,
         "explanation": (
             "Blockchain verification confirms that the committed report data has not changed. "

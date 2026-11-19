@@ -6,12 +6,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
 from ..db import get_db
 from ..intelligence.pipeline import CHECK_CATALOG, DEFAULT_CHECKS
-from ..models import AutomationSetting
+from ..models import new_automation, utcnow
 from .deps import Principal, audit, get_principal
 
 router = APIRouter(prefix="/automation", tags=["automation"])
@@ -25,38 +25,38 @@ class AutomationPatch(BaseModel):
     modules: dict[str, bool] | None = None
 
 
-def get_or_create(db: Session, principal: Principal) -> AutomationSetting:
+def get_or_create(db: Database, principal: Principal) -> dict:
     key = f"{principal.kind}:{principal.id}"
-    setting = db.execute(
-        select(AutomationSetting).where(AutomationSetting.owner_key == key)
-    ).scalar_one_or_none()
+    setting = db.automation_settings.find_one({"_id": key})
     if setting is None:
-        setting = AutomationSetting(
+        setting = new_automation(
             owner_key=key,
-            mode="automatic",
-            paused=False,
             modules={check: True for check in DEFAULT_CHECKS},
         )
-        db.add(setting)
-        db.commit()
-        db.refresh(setting)
-    return setting
+        try:
+            db.automation_settings.insert_one(setting)
+        except DuplicateKeyError:
+            setting = db.automation_settings.find_one({"_id": key})
+    return setting or new_automation(
+        owner_key=key, modules={check: True for check in DEFAULT_CHECKS}
+    )
 
 
-def serialize(setting: AutomationSetting) -> dict:
-    modules = {check: bool(setting.modules.get(check, True)) for check in CHECK_CATALOG}
+def serialize(setting: dict) -> dict:
+    modules = setting.get("modules") or {}
+    updated_at = setting.get("updated_at")
     return {
-        "mode": setting.mode,
-        "paused": setting.paused,
-        "modules": modules,
-        "updated_at": setting.updated_at.isoformat() if setting.updated_at else None,
+        "mode": setting.get("mode", "automatic"),
+        "paused": bool(setting.get("paused", False)),
+        "modules": {check: bool(modules.get(check, True)) for check in CHECK_CATALOG},
+        "updated_at": updated_at.isoformat() if updated_at else None,
         "note": "Automatic mode runs safe passive checks only. It never performs active scanning.",
     }
 
 
 @router.get("")
 def read(
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     return serialize(get_or_create(db, principal))
@@ -65,27 +65,28 @@ def read(
 @router.patch("")
 def update(
     payload: AutomationPatch,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     setting = get_or_create(db, principal)
+    updates: dict = {"updated_at": utcnow()}
     if payload.mode is not None:
-        setting.mode = payload.mode
+        updates["mode"] = payload.mode
     if payload.paused is not None:
-        setting.paused = payload.paused
+        updates["paused"] = payload.paused
     if payload.modules is not None:
         unknown = [key for key in payload.modules if key not in CHECK_CATALOG]
         if unknown:
             raise HTTPException(status_code=422, detail=f"Unknown module(s): {', '.join(unknown[:5])}")
-        merged = dict(setting.modules or {})
+        merged = dict(setting.get("modules") or {})
         merged.update({key: bool(value) for key, value in payload.modules.items()})
-        setting.modules = merged
-    db.commit()
-    db.refresh(setting)
+        updates["modules"] = merged
+    db.automation_settings.update_one({"_id": setting["_id"]}, {"$set": updates})
+    setting = db.automation_settings.find_one({"_id": setting["_id"]}) or setting
     audit(
         db,
         principal,
         "automation.updated",
-        detail={"mode": setting.mode, "paused": setting.paused},
+        detail={"mode": setting.get("mode"), "paused": setting.get("paused")},
     )
     return serialize(setting)

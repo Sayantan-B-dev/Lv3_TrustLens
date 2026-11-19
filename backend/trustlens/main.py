@@ -12,12 +12,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .api import api_router
 from .config import Settings, get_settings
-from .db import engine, init_db
+from .db import client, init_db, settings as db_settings
 from .security.redaction import safe_error
 from .worker.runner import worker_loop
 
@@ -37,7 +36,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     if settings.auto_create_schema:
         init_db()
-        logger.info("database schema ready (%s)", engine.dialect.name)
+        logger.info("MongoDB indexes ready (db=%s)", db_settings.mongodb_db)
     stop_event = asyncio.Event()
     worker_task: asyncio.Task | None = None
     if settings.worker_enabled:
@@ -49,7 +48,7 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(worker_task, timeout=10)
         except asyncio.TimeoutError:
             worker_task.cancel()
-    engine.dispose()
+    client.close()
 
 
 def create_app() -> FastAPI:
@@ -162,8 +161,7 @@ def create_app() -> FastAPI:
     @app.get("/ready", tags=["health"])
     def ready():
         try:
-            with engine.connect() as connection:
-                connection.execute(text("SELECT 1"))
+            client.admin.command("ping")
         except Exception as exc:
             logger.warning("readiness failed: %s", safe_error(exc, 120))
             return JSONResponse(

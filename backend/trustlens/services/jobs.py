@@ -1,167 +1,169 @@
-"""Durable, database-backed job queue with leases and bounded retries."""
+"""Durable, MongoDB-backed job queue with leases and bounded retries."""
 
 from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from pymongo import ASCENDING, ReturnDocument
+from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
 from ..config import Settings
-from ..models import Investigation, Job, utcnow
+from ..models import new_job, utcnow
 from ..security.redaction import safe_error
 
 
 def enqueue_investigation(
-    session: Session,
-    investigation: Investigation,
+    db: Database,
+    investigation: dict,
     *,
     idempotency_key: str | None = None,
     settings: Settings | None = None,
-) -> Job:
+) -> dict:
     from ..config import get_settings
 
     settings = settings or get_settings()
-    key = idempotency_key or f"investigation:{investigation.id}:{investigation.status}"
-    existing = session.execute(select(Job).where(Job.idempotency_key == key)).scalar_one_or_none()
+    key = idempotency_key or f"investigation:{investigation['_id']}:{investigation.get('status')}"
+    key = key[:191]
+    existing = db.jobs.find_one({"idempotency_key": key})
     if existing is not None:
         return existing
-    job = Job(
-        kind="investigation",
-        investigation_id=investigation.id,
-        status="queued",
+    job = new_job(
+        investigation_id=investigation["_id"],
+        idempotency_key=key,
         max_attempts=settings.job_max_attempts,
-        available_at=utcnow(),
-        idempotency_key=key[:191],
     )
-    session.add(job)
-    session.commit()
-    session.refresh(job)
+    try:
+        db.jobs.insert_one(job)
+    except DuplicateKeyError:  # pragma: no cover - concurrent enqueue
+        existing = db.jobs.find_one({"idempotency_key": key})
+        if existing is not None:
+            return existing
+        raise
     return job
 
 
-def claim_job(session: Session, settings: Settings) -> Job | None:
+def claim_job(db: Database, settings: Settings) -> dict | None:
     now = utcnow()
-    is_postgres = session.bind.dialect.name == "postgresql"
-
-    if is_postgres:
-        query = (
-            select(Job)
-            .where(Job.status == "queued", Job.available_at <= now)
-            .order_by(Job.created_at.asc())
-            .limit(1)
-            .with_for_update(skip_locked=True)
-        )
-        job = session.execute(query).scalar_one_or_none()
-        if job is None:
-            return None
-        job.status = "running"
-        job.attempts += 1
-        job.lease_expires_at = now + timedelta(seconds=settings.worker_lease_seconds)
-        if job.investigation_id:
-            session.execute(
-                update(Investigation)
-                .where(Investigation.id == job.investigation_id)
-                .values(status="running", started_at=now)
-            )
-        session.commit()
-        session.refresh(job)
-        return job
-
-    candidate = session.execute(
-        select(Job)
-        .where(Job.status == "queued", Job.available_at <= now)
-        .order_by(Job.created_at.asc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if candidate is None:
-        return None
-    claimed = session.execute(
-        update(Job)
-        .where(Job.id == candidate.id, Job.status == "queued")
-        .values(
-            status="running",
-            attempts=Job.attempts + 1,
-            lease_expires_at=now + timedelta(seconds=settings.worker_lease_seconds),
-            updated_at=now,
-        )
+    job = db.jobs.find_one_and_update(
+        {"status": "queued", "available_at": {"$lte": now}},
+        {
+            "$set": {
+                "status": "running",
+                "lease_expires_at": now + timedelta(seconds=settings.worker_lease_seconds),
+                "updated_at": now,
+            },
+            "$inc": {"attempts": 1},
+        },
+        sort=[("created_at", ASCENDING)],
+        return_document=ReturnDocument.AFTER,
     )
-    session.commit()
-    if claimed.rowcount != 1:
+    if job is None:
         return None
-    if candidate.investigation_id:
-        session.execute(
-            update(Investigation)
-            .where(Investigation.id == candidate.investigation_id)
-            .values(status="running", started_at=now)
+    if job.get("investigation_id"):
+        db.investigations.update_one(
+            {"_id": job["investigation_id"]},
+            {"$set": {"status": "running", "started_at": now}},
         )
-        session.commit()
-    session.refresh(candidate)
-    return candidate
+    return job
 
 
-def complete_job(session: Session, job: Job) -> None:
-    job.status = "succeeded"
-    job.lease_expires_at = None
-    job.last_error = None
-    job.updated_at = utcnow()
-    session.commit()
+def complete_job(db: Database, job: dict) -> None:
+    db.jobs.update_one(
+        {"_id": job["_id"]},
+        {
+            "$set": {
+                "status": "succeeded",
+                "lease_expires_at": None,
+                "last_error": None,
+                "updated_at": utcnow(),
+            }
+        },
+    )
 
 
-def fail_job(session: Session, job: Job, error: BaseException, settings: Settings) -> str:
+def fail_job(db: Database, job: dict, error: BaseException, settings: Settings) -> str:
     message = safe_error(error, 500)
-    job.last_error = message
-    if job.attempts >= job.max_attempts:
-        job.status = "failed"
-        job.lease_expires_at = None
-        if job.investigation_id:
-            investigation = session.get(Investigation, job.investigation_id)
-            if investigation is not None:
-                investigation.status = "failed"
-                investigation.error = message
-                investigation.completed_at = utcnow()
-    else:
-        backoff = min(settings.job_retry_base_seconds * (2 ** (job.attempts - 1)), 600)
-        job.status = "queued"
-        job.available_at = utcnow() + timedelta(seconds=backoff)
-        job.lease_expires_at = None
-        if job.investigation_id:
-            investigation = session.get(Investigation, job.investigation_id)
-            if investigation is not None and investigation.status == "running":
-                investigation.status = "queued"
-    job.updated_at = utcnow()
-    session.commit()
-    return job.status
-
-
-def recover_expired_leases(session: Session, settings: Settings) -> int:
+    attempts = int(job.get("attempts") or 0)
+    max_attempts = int(job.get("max_attempts") or settings.job_max_attempts)
     now = utcnow()
-    expired = session.execute(
-        select(Job).where(Job.status == "running", Job.lease_expires_at < now)
-    ).scalars().all()
+
+    if attempts >= max_attempts:
+        status = "failed"
+        updates = {
+            "status": status,
+            "last_error": message,
+            "lease_expires_at": None,
+            "updated_at": now,
+        }
+        if job.get("investigation_id"):
+            db.investigations.update_one(
+                {"_id": job["investigation_id"]},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "error": message,
+                        "completed_at": now,
+                    }
+                },
+            )
+    else:
+        status = "queued"
+        backoff = min(settings.job_retry_base_seconds * (2 ** (attempts - 1)), 600)
+        updates = {
+            "status": status,
+            "last_error": message,
+            "available_at": now + timedelta(seconds=backoff),
+            "lease_expires_at": None,
+            "updated_at": now,
+        }
+        if job.get("investigation_id"):
+            db.investigations.update_one(
+                {"_id": job["investigation_id"], "status": "running"},
+                {"$set": {"status": "queued"}},
+            )
+
+    db.jobs.update_one({"_id": job["_id"]}, {"$set": updates})
+    return status
+
+
+def recover_expired_leases(db: Database, settings: Settings) -> int:
+    now = utcnow()
+    expired = db.jobs.find({"status": "running", "lease_expires_at": {"$lt": now}})
     recovered = 0
     for job in expired:
-        if job.attempts >= job.max_attempts:
-            job.status = "failed"
-            job.last_error = "Worker lease expired after the maximum number of attempts."
-            if job.investigation_id:
-                investigation = session.get(Investigation, job.investigation_id)
-                if investigation is not None:
-                    investigation.status = "failed"
-                    investigation.error = job.last_error
+        attempts = int(job.get("attempts") or 0)
+        max_attempts = int(job.get("max_attempts") or settings.job_max_attempts)
+        if attempts >= max_attempts:
+            status = "failed"
+            message = "Worker lease expired after the maximum number of attempts."
+            if job.get("investigation_id"):
+                db.investigations.update_one(
+                    {"_id": job["investigation_id"]},
+                    {"$set": {"status": "failed", "error": message, "completed_at": now}},
+                )
+            updates = {
+                "status": status,
+                "last_error": message,
+                "lease_expires_at": None,
+                "updated_at": now,
+            }
         else:
-            job.status = "queued"
-            job.available_at = now
-            job.last_error = "Recovered after an expired worker lease."
-        job.lease_expires_at = None
+            updates = {
+                "status": "queued",
+                "available_at": now,
+                "last_error": "Recovered after an expired worker lease.",
+                "lease_expires_at": None,
+                "updated_at": now,
+            }
+        db.jobs.update_one({"_id": job["_id"]}, {"$set": updates})
         recovered += 1
-    session.commit()
     return recovered
 
 
-def queue_depth(session: Session) -> dict:
-    rows = session.execute(select(Job.status, Job.id)).all()
+def queue_depth(db: Database) -> dict:
     counts: dict[str, int] = {}
-    for status, _id in rows:
-        counts[status] = counts.get(status, 0) + 1
+    for status in db.jobs.distinct("status"):
+        if status:
+            counts[str(status)] = db.jobs.count_documents({"status": status})
     return counts

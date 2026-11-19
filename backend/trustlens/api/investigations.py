@@ -7,8 +7,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from pymongo import DESCENDING
+from pymongo.database import Database
 
 from ..config import Settings, get_settings
 from ..db import get_db
@@ -20,12 +20,13 @@ from ..intelligence.normalize import (
 )
 from ..intelligence.pipeline import CHECK_CATALOG, default_checks
 from ..intelligence.risk import RISK_CLASSES, RISK_DEFINITIONS
-from ..models import CheckResult, Feedback, Indicator, Investigation, ThreatReport, utcnow
+from ..models import new_feedback, new_investigation, utcnow
 from ..security.redaction import redact_text
 from ..services.jobs import enqueue_investigation
 from ..services.reports import build_report_payload
+from .automation import get_or_create as _automation
 from .deps import Principal, audit, get_principal, owned_investigation, require_rate_limit
-from .serializers import iso, serialize_investigation
+from .serializers import serialize_investigation
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
 
@@ -65,56 +66,18 @@ def normalise_checks(raw: list[str] | None, input_type: str) -> list[str]:
     return ordered or default_checks(input_type)
 
 
-def _automation(db: Session, principal: Principal):
-    from ..models import AutomationSetting
-    from ..intelligence.pipeline import DEFAULT_CHECKS
-
-    key = f"{principal.kind}:{principal.id}"
-    setting = db.execute(
-        select(AutomationSetting).where(AutomationSetting.owner_key == key)
-    ).scalar_one_or_none()
-    if setting is None:
-        setting = AutomationSetting(
-            owner_key=key,
-            mode="automatic",
-            paused=False,
-            modules={check: True for check in DEFAULT_CHECKS},
-        )
-        db.add(setting)
-        db.commit()
-        db.refresh(setting)
-    return setting
-
-
-def _load_children(db: Session, investigation_id: str):
-    checks = (
-        db.execute(
-            select(CheckResult)
-            .where(CheckResult.investigation_id == investigation_id)
-            .order_by(CheckResult.id)
-        )
-        .scalars()
-        .all()
+def _load_children(investigation: dict):
+    checks = sorted(
+        investigation.get("checks") or [],
+        key=lambda item: item.get("id", 0),
     )
-    indicators = (
-        db.execute(
-            select(Indicator)
-            .where(Indicator.investigation_id == investigation_id)
-            .order_by(Indicator.id)
-        )
-        .scalars()
-        .all()
+    indicators = list(investigation.get("indicators") or [])
+    reports = sorted(
+        investigation.get("reports") or [],
+        key=lambda item: item.get("created_at") or utcnow(),
+        reverse=True,
     )
-    reports = (
-        db.execute(
-            select(ThreatReport)
-            .where(ThreatReport.investigation_id == investigation_id)
-            .order_by(ThreatReport.created_at.desc())
-        )
-        .scalars()
-        .all()
-    )
-    return list(checks), list(indicators), list(reports)
+    return checks, indicators, reports
 
 
 @router.post("", status_code=202)
@@ -122,7 +85,7 @@ def submit(
     payload: SubmitIn,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
     settings: Settings = Depends(get_settings),
 ):
@@ -157,8 +120,8 @@ def submit(
 
     checks = normalise_checks(payload.checks, input_type)
     automation = _automation(db, principal)
-    mode = payload.mode or automation.mode
-    paused = bool(automation.paused)
+    mode = payload.mode or automation.get("mode", "automatic")
+    paused = bool(automation.get("paused", False))
     should_queue = mode == "automatic" and not paused
 
     days = (
@@ -166,7 +129,7 @@ def submit(
         if principal.kind == "user"
         else settings.anonymous_retention_days
     )
-    investigation = Investigation(
+    investigation = new_investigation(
         owner_kind=principal.kind,
         owner_id=principal.id,
         input_type=input_type,
@@ -175,19 +138,16 @@ def submit(
         mode=mode,
         status="queued" if should_queue else "draft",
         checks_requested=checks,
-        ruleset_version="trustlens-rules-v1",
         expires_at=utcnow() + timedelta(days=days),
     )
-    db.add(investigation)
-    db.commit()
-    db.refresh(investigation)
+    db.investigations.insert_one(investigation)
 
     queued = False
     if should_queue:
         enqueue_investigation(
             db,
             investigation,
-            idempotency_key=f"investigation:{investigation.id}:initial",
+            idempotency_key=f"investigation:{investigation['_id']}:initial",
             settings=settings,
         )
         queued = True
@@ -196,7 +156,7 @@ def submit(
         db,
         principal,
         "investigation.created",
-        target=investigation.id,
+        target=investigation["_id"],
         detail={"input_type": input_type, "mode": mode, "queued": queued},
     )
     return {
@@ -215,22 +175,24 @@ def submit(
 def history(
     limit: int = 12,
     offset: int = 0,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     limit = max(1, min(limit, 50))
     offset = max(0, offset)
-    base = select(Investigation).where(
-        Investigation.owner_kind == principal.kind, Investigation.owner_id == principal.id
-    )
-    total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+    query = {"owner_kind": principal.kind, "owner_id": principal.id}
+    total = db.investigations.count_documents(query)
     rows = (
-        db.execute(base.order_by(Investigation.created_at.desc()).offset(offset).limit(limit))
-        .scalars()
-        .all()
+        db.investigations.find(query)
+        .sort([("created_at", DESCENDING)])
+        .skip(offset)
+        .limit(limit)
     )
     return {
-        "items": [serialize_investigation(row, include_checks=False) for row in rows],
+        "items": [
+            serialize_investigation(row, include_checks=False)
+            for row in rows
+        ],
         "total": int(total),
         "limit": limit,
         "offset": offset,
@@ -240,11 +202,11 @@ def history(
 @router.get("/{investigation_id}")
 def detail(
     investigation_id: str,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     investigation = owned_investigation(db, principal, investigation_id)
-    checks, indicators, reports = _load_children(db, investigation.id)
+    checks, indicators, reports = _load_children(investigation)
     return serialize_investigation(
         investigation, checks=checks, indicators=indicators, reports=reports
     )
@@ -255,49 +217,51 @@ def run(
     investigation_id: str,
     request: Request,
     payload: RunIn | None = None,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
     settings: Settings = Depends(get_settings),
 ):
     require_rate_limit(request, settings, strict=True)
     investigation = owned_investigation(db, principal, investigation_id)
-    if investigation.status in {"queued", "running"}:
+    if investigation.get("status") in {"queued", "running"}:
         raise HTTPException(status_code=409, detail="This investigation is already running.")
 
     checks = normalise_checks(
-        payload.checks if payload else None, investigation.input_type
+        payload.checks if payload else None, investigation.get("input_type", "url")
     )
-    investigation.checks_requested = checks
-    investigation.status = "queued"
-    investigation.error = None
-    db.commit()
+    now = utcnow()
+    db.investigations.update_one(
+        {"_id": investigation["_id"]},
+        {
+            "$set": {
+                "checks_requested": checks,
+                "status": "queued",
+                "error": None,
+                "updated_at": now,
+            }
+        },
+    )
+    investigation.update({"checks_requested": checks, "status": "queued", "error": None})
 
-    attempt = (
-        db.execute(
-            select(func.count())
-            .select_from(Investigation)
-            .where(Investigation.id == investigation.id)
-        ).scalar_one()
-    )
     enqueue_investigation(
         db,
         investigation,
-        idempotency_key=f"investigation:{investigation.id}:run:{utcnow().isoformat()}:{attempt}",
+        idempotency_key=f"investigation:{investigation['_id']}:run:{now.isoformat()}",
         settings=settings,
     )
-    audit(db, principal, "investigation.queued", target=investigation.id, detail={"checks": checks})
+    audit(db, principal, "investigation.queued", target=investigation["_id"], detail={"checks": checks})
     return {"queued": True, "investigation": serialize_investigation(investigation, include_checks=False)}
 
 
 @router.delete("/{investigation_id}", status_code=204)
 def delete(
     investigation_id: str,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     investigation = owned_investigation(db, principal, investigation_id)
-    db.delete(investigation)
-    db.commit()
+    db.investigations.delete_one({"_id": investigation["_id"]})
+    db.jobs.delete_many({"investigation_id": investigation["_id"]})
     audit(db, principal, "investigation.deleted", target=investigation_id)
     return Response(status_code=204)
 
@@ -305,11 +269,11 @@ def delete(
 @router.get("/{investigation_id}/export")
 def export(
     investigation_id: str,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     investigation = owned_investigation(db, principal, investigation_id)
-    payload = build_report_payload(db, investigation)
+    payload = build_report_payload(investigation)
     import json
 
     body = json.dumps(payload, indent=2, ensure_ascii=False)
@@ -317,7 +281,7 @@ def export(
         content=body,
         media_type="application/json",
         headers={
-            "Content-Disposition": f'attachment; filename="trustlens-{investigation.id[:8]}.json"',
+            "Content-Disposition": f'attachment; filename="trustlens-{investigation["_id"][:8]}.json"',
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -327,22 +291,21 @@ def export(
 def feedback(
     investigation_id: str,
     payload: FeedbackIn,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     investigation = owned_investigation(db, principal, investigation_id)
     if payload.kind == "report_abuse" and not (payload.comment or "").strip():
         raise HTTPException(status_code=422, detail="Describe the abuse in the comment field.")
-    record = Feedback(
-        investigation_id=investigation.id,
+    record = new_feedback(
+        investigation_id=investigation["_id"],
         owner_key=f"{principal.kind}:{principal.id}",
         kind=payload.kind,
         comment=redact_text(payload.comment or "")[:1000] or None,
     )
-    db.add(record)
-    db.commit()
-    audit(db, principal, "feedback.created", target=investigation.id, detail={"kind": payload.kind})
-    return {"id": record.id, "status": record.status}
+    db.feedback.insert_one(record)
+    audit(db, principal, "feedback.created", target=investigation["_id"], detail={"kind": payload.kind})
+    return {"id": record["_id"], "status": record["status"]}
 
 
 @router.get("/meta/checks")
