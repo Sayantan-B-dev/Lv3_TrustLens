@@ -36,7 +36,7 @@ FastAPI API + embedded worker (backend)
   ├── Intelligence pipeline ── URL · DNS · HTTP · TLS · headers · messages · correlation
   ├── Deterministic risk engine (trustlens-rules-v1)
   ├── Optional AI explainer (evidence-bound, validated, fallback)
-  ├── SQLAlchemy 2 ── SQLite locally / PostgreSQL (Neon) in production
+  ├── MongoDB (PyMongo) ── local mongod or a shared cluster, dedicated database
   └── EVM JSON-RPC client ── Solidity ReportRegistry (digest + report ref only)
 ```
 
@@ -49,8 +49,8 @@ The API and worker share one process for the free-tier MVP. The job queue lives 
 | Layer | Technology |
 | --- | --- |
 | Frontend | Next.js 16.4 App Router, React 19.3, strict TypeScript, Tailwind CSS 4, anime.js 4 |
-| Backend | Python 3.13, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic |
-| Database | SQLite by default; PostgreSQL 18 / Neon via `DATABASE_URL` |
+| Backend | Python 3.13, FastAPI, Pydantic v2, PyMongo |
+| Database | MongoDB 8 via `MONGODB_URL`; dedicated `MONGODB_DB` (default `trustlens`) |
 | Intelligence | Python `ssl`, `cryptography`, `dnspython`, `httpx`, certifi roots |
 | AI | Provider abstraction (`auto`, `none`, `mock`, `openai`, `deterministic`) |
 | Web3 | Solidity 0.8.28, Hardhat 3, raw JSON-RPC + `eth-account` |
@@ -62,7 +62,7 @@ The API and worker share one process for the free-tier MVP. The job queue lives 
 
 ```text
 frontend/                Pure Next.js dashboard, API client, Vitest tests
-backend/                 FastAPI app, intelligence engine, AI, worker, migrations, pytest
+backend/                 FastAPI app, intelligence engine, AI, worker, MongoDB document layer, pytest
 backend/contracts/       Optional Solidity ReportRegistry, Hardhat config and tests
 backend/run.py             Start the API or run backend commands with the venv
 docs/                    SRS copy, architecture, security, testing, deployment, AI, learning
@@ -78,9 +78,10 @@ README.md                This file
 
 - **Node.js 24** and **pnpm 11** (`corepack enable` if pnpm is unavailable).
 - **Python 3.13** with `venv`.
+- **MongoDB 8** running locally (`mongod` or the MongoDB service on `127.0.0.1:27017`).
 - Git Bash on Windows is assumed below. macOS/Linux users replace `.venv/Scripts/python.exe` with `.venv/bin/python`.
-- Optional: PostgreSQL 18, Google OAuth credentials, an OpenAI-compatible key, a local Hardhat chain.
-- No cloud account, API key, Docker or PostgreSQL is required to run the core product.
+- Optional: Google OAuth credentials, an OpenAI-compatible key, a local Hardhat chain.
+- No cloud account, API key or Docker is required; the core product uses a local MongoDB.
 
 ---
 
@@ -108,7 +109,7 @@ python backend/run.py
 - Docs: <http://127.0.0.1:8000/docs>
 - Health: <http://127.0.0.1:8000/health>
 
-`backend/run.py` uses `backend/.venv` automatically. Apply migrations when needed with `python backend/run.py -m alembic upgrade head`; local SQLite tables are also created at startup by default.
+`backend/run.py` uses `backend/.venv` automatically. MongoDB indexes are created at startup. The default URL is `mongodb://127.0.0.1:27017` and the dedicated database is `trustlens`; set `MONGODB_URL` in `backend/.env` to use another cluster.
 
 macOS/Linux use `backend/.venv/bin/python` instead of `backend/.venv/Scripts/python`.
 
@@ -146,30 +147,27 @@ Never commit either env file.
 
 ## Database configuration
 
-### SQLite (default, zero setup)
+TrustLens uses MongoDB documents rather than relational tables. An investigation embeds its checks, indicators and reports, so the normal read path is one document.
+
+### Local MongoDB (default)
+
+Start MongoDB locally, then use the committed default:
 
 ```env
-DATABASE_URL=sqlite+pysqlite:///./trustlens.db
+MONGODB_URL=mongodb://127.0.0.1:27017
+MONGODB_DB=trustlens
 ```
 
-Relative paths resolve from the backend working directory (`backend`).
+`MONGODB_DB` is always a dedicated database name. On a shared cluster, change only `MONGODB_URL` (and optionally `MONGODB_DB` to your assigned namespace).
 
-### PostgreSQL / Neon
-
-Create a database and set:
+### Shared or hosted cluster
 
 ```env
-DATABASE_URL=postgresql+psycopg://trustlens:YOUR_PASSWORD@localhost:5432/trustlens
-DIRECT_DATABASE_URL=postgresql+psycopg://trustlens:YOUR_PASSWORD@localhost:5432/trustlens
+MONGODB_URL=mongodb+srv://USER:PASSWORD@cluster.example.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB=trustlens_yourname
 ```
 
-For Neon, use the **pooled** URL for `DATABASE_URL` and the **direct** URL for `DIRECT_DATABASE_URL` (Alembic). Then run:
-
-```bash
-python backend/run.py -m alembic upgrade head
-```
-
-If `psql` is not on PATH on Windows, create the database/user with pgAdmin's Query Tool. Do not put credentials in Git or chat.
+Indexes are created automatically on startup when `AUTO_CREATE_SCHEMA=true`. No migration command is required. Never put credentials in Git or chat.
 
 ---
 
@@ -195,7 +193,7 @@ cd backend/contracts && pnpm test
 cd frontend && pnpm test:e2e
 ```
 
-For database changes, `python backend/run.py -m alembic upgrade head` applies migrations; no activation is required.
+For database changes, update the document access code and index definitions in `backend/trustlens/db.py`; indexes are applied at startup.
 
 ---
 
@@ -234,7 +232,7 @@ Restart the backend. In the dashboard, create a report → **Commit on-chain** �
 | Google OAuth | No | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; redirect URI must match exactly |
 | URLhaus | No key | `THREAT_INTEL_ENABLED=true`; optional `URLHAUS_AUTH_KEY` for higher limits |
 | crt.sh | No key | `CT_LOOKUP_ENABLED=true` |
-| PostgreSQL/Neon | No | `DATABASE_URL` + `DIRECT_DATABASE_URL` |
+| MongoDB | Yes (local default) | `MONGODB_URL` + dedicated `MONGODB_DB` |
 | EVM registry | No | local Hardhat address + local dev key |
 
 Production must change `SESSION_SECRET`, set `COOKIE_SECURE=true`, and use `ENVIRONMENT=production`.
@@ -247,7 +245,7 @@ Detailed beginner-friendly steps are in [`docs/deployment/free-tier.md`](docs/de
 
 - **Vercel** — Next.js in `frontend`; set `BACKEND_URL` to the Render URL.
 - **Render** — one Python web service from `backend`; `backend/render.yaml` is included.
-- **Neon** — PostgreSQL; pooled URL for the app, direct URL for migrations.
+- **MongoDB Atlas** — shared cluster; set `MONGODB_URL` and a dedicated `MONGODB_DB`.
 - **GitHub Actions** — optional CI only; no workflow is bundled in this trimmed repository.
 
 Free tiers sleep, have instance-hour and usage limits, and are not an uptime guarantee. Local development never requires these accounts.
@@ -274,8 +272,8 @@ Free tiers sleep, have instance-hour and usage limits, and are not an uptime gua
 | `unable to get local issuer certificate` | TrustLens already uses certifi roots. Check system proxy/VPN or corporate interception; never disable TLS verification. |
 | Worker shows idle | Set `WORKER_ENABLED=true`, restart the API, check `/api/v1/system/status`. |
 | Queue item stays queued | Worker disabled, automation paused, or the job is backing off after a retry. |
-| `database is locked` (SQLite) | Run one API/worker process; use PostgreSQL for concurrent production workloads. |
-| Alembic cannot connect | `DIRECT_DATABASE_URL` must be a direct (non-pooled) PostgreSQL URL. |
+| MongoDB connection refused | Start `mongod` (or the MongoDB service) and check `MONGODB_URL` reaches port 27017. |
+| Wrong database / missing history | Confirm `MONGODB_DB` is the dedicated TrustLens database for this environment. |
 | Google sign-in redirects fail | Register the exact `GOOGLE_REDIRECT_URI`, including scheme/host/port. |
 | Commit says registry not configured | Set `CHAIN_CONTRACT_ADDRESS`, restart, and ensure the Hardhat node is running. |
 | Port already in use | `pnpm --dir frontend dev -- -p 3001` or change the uvicorn port and `BACKEND_URL`. |

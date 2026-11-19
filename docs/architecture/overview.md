@@ -12,8 +12,8 @@ TrustLens is one product with three runnable parts:
                                                                          │
                         ┌────────────────────────────────────────────────┼──────────────────────────┐
                         ▼                                                ▼                          ▼
-              Intelligence pipeline                             SQLAlchemy / PostgreSQL      EVM JSON-RPC
-       URL · DNS · HTTP · TLS · headers · messages         investigations, evidence, jobs      ReportRegistry
+              Intelligence pipeline                             MongoDB (PyMongo)            EVM JSON-RPC
+       URL · DNS · HTTP · TLS · headers · messages         embedded checks, evidence, jobs    ReportRegistry
                         │                                                │                    (digest only)
                         └──────────────▶ deterministic risk ◀────────────┘
                                                │
@@ -26,8 +26,8 @@ The browser never talks to the database or chain directly. By default Next.js pr
 ## Request lifecycle
 
 1. `POST /api/v1/investigations` validates input, normalises a URL or accepts a message, resolves the anonymous/user principal, applies automation settings and rate limits, persists the investigation, and optionally enqueues a job.
-2. The embedded worker claims a queued job in a short transaction. PostgreSQL uses `FOR UPDATE SKIP LOCKED`; SQLite uses an optimistic conditional update. A lease timestamp prevents two workers from processing the same job.
-3. The pipeline runs applicable checks and persists a `CheckResult` for every check, including `unavailable`/`error` outcomes. Checks are independent; a failed network source does not fabricate a result.
+2. The embedded worker claims a queued job with an atomic MongoDB `findAndModify`. The claim increments attempts, sets a running lease and writes the investigation status. A lease timestamp prevents two workers from processing the same job; expired leases are recovered.
+3. The pipeline runs applicable checks and replaces the investigation document's embedded `checks` and `indicators` arrays, including `unavailable`/`error` outcomes. Checks are independent; a failed network source does not fabricate a result.
 4. Findings are converted to `RiskFinding`s and passed to the deterministic risk engine. The assessment (class, score, coverage, confidence, reasons, limitations, next actions) is persisted.
 5. AI, if enabled, receives only structured evidence and the already-computed risk assessment. Its output must cite existing evidence IDs; otherwise the deterministic explanation is used. AI never mutates the risk class.
 6. The API serialises the investigation, evidence, indicators, reports and AI explanation. The dashboard polls while a job is active and renders the result.
@@ -43,8 +43,8 @@ The browser never talks to the database or chain directly. By default Next.js pr
 | `trustlens/security/` | Netguard/SSRF, canonical JSON, redaction, sessions, TLS context, rate limiting |
 | `trustlens/services/` | Report building, job queue, chain client |
 | `trustlens/worker/` | Claim loop, heartbeat, processing, retry/failure handling, graceful shutdown |
-| `trustlens/models.py` | SQLAlchemy entities: sessions/users, investigations, checks, evidence, risk, IOCs, relationships, reports, jobs, automation, rules, feedback |
-| `migrations/` | Alembic initial schema and environment |
+| `trustlens/models.py` | MongoDB document factories: sessions/users, investigations (embedded checks, indicators, reports), jobs, automation, rules, feedback, audit |
+| `trustlens/db.py` | Mongo client, dedicated database selection, collection indexes and ruleset seed |
 
 ## Risk engine
 
@@ -80,11 +80,11 @@ The on-chain registry stores `(bytes32 reportRef → bytes32 digest)` plus submi
 
 ## Configuration and deployment
 
-Settings are environment-driven (`pydantic-settings`), with SQLite and deterministic AI as safe defaults. The same code runs locally and on Render; no cloud account is needed for local use. See [`docs/deployment/free-tier.md`](../deployment/free-tier.md).
+Settings are environment-driven (`pydantic-settings`), with local MongoDB and deterministic AI as safe defaults. The same code runs locally and on Render; no cloud account is needed for local use. See [`docs/deployment/free-tier.md`](../deployment/free-tier.md).
 
 ## Design trade-offs
 
 - **One process for API + worker** keeps the free tier simple; a dedicated worker deployment is a future scaling step.
 - **Deterministic risk + AI explanation** sacrifices “AI decides everything” novelty for auditability, which is the product's differentiator.
-- **SQLite default** makes the project runnable with zero credentials; PostgreSQL remains the production path, with dialect-specific job claiming.
+- **Local MongoDB** is the only storage dependency; a shared cluster needs only a different `MONGODB_URL`, with `MONGODB_DB` keeping the namespace dedicated.
 - **No Redis/Kubernetes/Docker** reduces setup burden for a hackathon and reviewers.

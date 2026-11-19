@@ -5,12 +5,12 @@ description: Use when changing background jobs, workers, retries, leases, idempo
 
 # Durable job queue
 
-Files: `services/jobs.py`, `worker/runner.py`, `models.Job`.
+Files: `backend/trustlens/services/jobs.py`, `backend/trustlens/worker/runner.py`, `jobs` collection.
 
 Invariants:
 
-- A job is a database row; enqueue is idempotent via `idempotency_key`.
-- Claim in a short transaction. PostgreSQL: `FOR UPDATE SKIP LOCKED`. SQLite: optimistic conditional update and rowcount check.
+- A job is a MongoDB document; enqueue is idempotent via a unique `idempotency_key` index.
+- Claim with one atomic `find_one_and_update` on `{status: queued, available_at <= now}`, sorted by `created_at`.
 - Claim increments `attempts`, sets `running` and a lease expiry.
 - Retry delay is bounded exponential: `min(base * 2^(attempts-1), 600)`; investigation returns to `queued`.
 - After `max_attempts`, job and investigation become `failed` with a safe error.
@@ -18,4 +18,4 @@ Invariants:
 - Graceful shutdown stops claiming and waits for the current job.
 - Heartbeat is persisted for `/system/status`; never claim if the worker is disabled.
 
-Test retry, recovery, max-attempt failure and idempotency with SQLite. Do not add Redis or in-memory-only queues for the MVP.
+Test retry, recovery, max-attempt failure and idempotency with `mongomock`. Do not add Redis or in-memory-only queues for the MVP.

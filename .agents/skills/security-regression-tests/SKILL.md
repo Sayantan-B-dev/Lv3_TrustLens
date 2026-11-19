@@ -23,7 +23,7 @@ Rules:
 - Use `stub_network`; never rely on public internet in tests.
 - Assert the security property, not an implementation detail.
 - Do not skip/weaken tests to get green; report environment limitations.
-- Keep tests deterministic (no sleeps where avoidable; SQLite timezone-safe comparisons).
+- Keep tests deterministic (no sleeps where avoidable; timezone-safe datetime comparisons).
 - Add both an allowed and a rejected case for new validation.
 
 Run the full backend suite after any security change.

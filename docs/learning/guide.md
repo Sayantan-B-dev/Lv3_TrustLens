@@ -24,7 +24,7 @@ Hashing JSON requires deterministic bytes. TrustLens normalises Unicode (NFC), s
 
 ### Durable jobs
 
-Jobs are rows, not in-memory tasks. Claiming uses a transaction and a lease. PostgreSQL uses `SELECT … FOR UPDATE SKIP LOCKED`; SQLite uses an optimistic conditional update. Retries use bounded exponential backoff. Expired leases are recovered. This survives process restarts and prevents double processing.
+Jobs are MongoDB documents, not in-memory tasks. Claiming uses an atomic `findAndModify` that increments attempts and sets a lease. Retries use bounded exponential backoff. Expired leases are recovered. This survives process restarts and prevents double processing.
 
 ### TLS trust
 
@@ -42,7 +42,7 @@ A blockchain commitment proves the report existed in a particular form. It does 
 
 | Decision | Why | Cost |
 | --- | --- | --- |
-| SQLite default, PostgreSQL supported | Zero-setup local runnable demo | Some dialect-specific code for job claiming |
+| MongoDB default, shared cluster supported | Local-first runnable demo; only the URL changes | Requires a local mongod or cluster |
 | One API + worker process | Fits Render free tier; simpler ops | Worker competes with API for resources; sleeps with the service |
 | Deterministic risk, AI explanation | Auditability and safety | Less “AI magic”; rules require maintenance |
 | Passive-only checks | Safe to point at hostile input | No JS rendering, no authenticated pages, limited coverage |

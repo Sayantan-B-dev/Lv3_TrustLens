@@ -14,7 +14,7 @@ Rules:
 - Update traceability when adding a module, test or known gap.
 - Include Windows/Git Bash paths because that is the primary local environment, plus POSIX alternatives where useful.
 - No secrets or real env values in docs.
-- Keep the README quick-start ordered: install → env → migrate → API → web → tests.
+- Keep the README quick-start ordered: install → env → MongoDB → API → web → tests.
 - Handoff: `python .agents/scripts/create_handoff.py` writes a git-ignored report.
 
-Check links resolve and commands match `package.json`, `requirements.txt` and `alembic.ini`. Re-run any check whose result is stated.
+Check links resolve and commands match `package.json`, `requirements.txt` and `backend/trustlens/db.py`. Re-run any check whose result is stated.

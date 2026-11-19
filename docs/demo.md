@@ -83,7 +83,7 @@ with a gift card. Verify at https://bank-secure-login.example/verify before midn
 
 ## Reset demo data
 
-Stop the API and delete `backend/trustlens.db` (SQLite) or drop/recreate the PostgreSQL schema and rerun `python backend/run.py -m alembic upgrade head`. Deleting the local database is destructive; only do it in a demo environment.
+Stop the API and drop the dedicated MongoDB database (for example with `mongosh` → `use trustlens` → `db.dropDatabase()`), then restart the API to recreate indexes and the ruleset seed. Dropping a database is destructive; only do it in a demo environment.
 
 ## If something fails
 

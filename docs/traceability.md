@@ -54,7 +54,7 @@ Source: [`srs.md`](../srs.md), preserved verbatim at [`docs/source/SRS.md`](sour
 | Risk engine with five classes | Implemented and tested |
 | Next.js dashboard | Implemented; build/typecheck/tests pass |
 | Reports and blockchain verification | Implemented; local commit/verify passed |
-| Database persistence and migrations | Implemented; initial Alembic migration applied in smoke checks |
+| Database persistence | Implemented; MongoDB document model and index bootstrap verified against local MongoDB |
 | Tests | 66 backend, 5 frontend, 8 contract tests pass |
 | Documentation | This docs tree, README, SRS copy, AGENTS.md |
 | Reproducible demo | [`docs/demo.md`](demo.md) |

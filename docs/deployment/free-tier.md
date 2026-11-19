@@ -1,15 +1,14 @@
-# Free-tier deployment: Vercel + Render + Neon
+# Free-tier deployment: Vercel + Render + MongoDB Atlas
 
 This guide deploys the existing code. The agent did **not** create accounts, deploy, or spend testnet funds. Do not commit secrets. Free tiers change; verify current limits before relying on them.
 
-## 1. Database — Neon PostgreSQL
+## 1. Database — MongoDB Atlas
 
-1. Create a Neon project in the closest available region (Singapore / `ap-southeast-1` if offered).
-2. Copy two connection strings:
-   - **Pooled** → `DATABASE_URL` (used by the app).
-   - **Direct** → `DIRECT_DATABASE_URL` (used by Alembic migrations).
-3. Keep `sslmode=require` in the URLs.
-4. Local alternative: PostgreSQL 18 with a `trustlens` database and user. SQLite also works with no setup.
+1. Create a free MongoDB Atlas cluster in the closest available region.
+2. Create a database user and allow the Render egress address.
+3. Copy the driver connection string into `MONGODB_URL`.
+4. Choose a dedicated database name (for example `trustlens` or `trustlens_yourname`) for `MONGODB_DB`. Do not reuse another app's database name on a shared cluster.
+5. Local alternative: MongoDB 8 on `mongodb://127.0.0.1:27017` with the same `MONGODB_DB`.
 
 ## 2. Backend — Render
 
@@ -18,7 +17,7 @@ The repository includes [`backend/render.yaml`](../../backend/render.yaml). Eith
 - **Repository:** this repo.
 - **Root directory:** `backend`.
 - **Runtime:** Python 3.13.
-- **Build command:** `pip install -r requirements.txt && alembic upgrade head`
+- **Build command:** `pip install -r requirements.txt`
 - **Start command:** `uvicorn trustlens.main:app --host 0.0.0.0 --port $PORT`
 - **Health check path:** `/ready`
 - **Plan:** Free (note: sleeps after inactivity).
@@ -27,8 +26,8 @@ Environment variables:
 
 ```env
 ENVIRONMENT=production
-DATABASE_URL=postgresql+psycopg://...pooled...
-DIRECT_DATABASE_URL=postgresql+psycopg://...direct...
+MONGODB_URL=mongodb+srv://USER:PASSWORD@cluster.example.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB=trustlens
 SESSION_SECRET=<generate a long random value>
 COOKIE_SECURE=true
 FRONTEND_URL=https://your-app.vercel.app
@@ -51,7 +50,7 @@ curl https://YOUR-SERVICE.onrender.com/health
 curl https://YOUR-SERVICE.onrender.com/ready
 ```
 
-If migrations fail, confirm `DIRECT_DATABASE_URL` is the direct host and that the database is reachable.
+If startup fails, confirm `MONGODB_URL` is reachable from Render and that the Atlas user can read/write `MONGODB_DB`. Indexes are created on startup.
 
 ## 3. Frontend — Vercel
 
@@ -96,7 +95,7 @@ No secrets are required for those checks, and none of them deploy.
 ## Free-tier limitations (be honest with judges/users)
 
 - Render Free services sleep after inactivity; the first request may be slow. Monthly instance-hour limits apply.
-- Neon Free has storage/compute limits and may suspend idle computes.
+- MongoDB Atlas Free has storage and connection limits; shared clusters have noisy-neighbour effects.
 - Vercel Hobby has usage and commercial-eligibility restrictions.
 - No SLA, no guaranteed uptime, no managed backups on free plans.
 - The embedded worker stops when the web service sleeps; queued jobs resume after wake.

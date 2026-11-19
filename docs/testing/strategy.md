@@ -11,7 +11,7 @@
 | Contracts (8 tests) | `cd backend/contracts && pnpm test` | Storage, events, metadata, duplicate rejection, zero digest, owner-only, ownership transfer, missing reference |
 | Browser smoke (1 flow) | `cd frontend && pnpm test:e2e` | Message investigation, deterministic risk render, report creation and local digest verification through the real UI |
 
-Backend tests use SQLite and stub DNS/HTTP/TLS for deterministic API runs. They never contact the public internet.
+Backend tests use `mongomock` for the document layer and stub DNS/HTTP/TLS for deterministic API runs. They never contact the public internet or a real MongoDB.
 
 ## Important backend cases
 

@@ -24,7 +24,7 @@ These instructions apply to the whole repository. Read `srs.md` / `docs/source/S
 - Run commands from the repository root. Backend commands use `backend/.venv` (or `python backend/run.py`).
 - Make the smallest coherent change; do not add unrequested features or dependencies.
 - No automatic `git commit`, push, deploy, paid resource or testnet spend. A user must explicitly request those actions.
-- Do not rewrite migrations that have been applied; add a new Alembic revision.
+- MongoDB is the only datastore. Keep `MONGODB_DB` dedicated; investigations embed checks, indicators and reports. Declare indexes in `backend/trustlens/db.py` (no SQL migrations).
 - Keep the single-page dashboard free of dead controls: every visible button must call a real API or perform a real local action.
 
 ## Checks before calling work complete
@@ -35,7 +35,7 @@ cd frontend && pnpm typecheck && pnpm test && pnpm build
 cd backend/contracts && pnpm test
 ```
 
-For database changes, also run `python backend/run.py -m alembic upgrade head` against a scratch database. For UI changes, check desktop and narrow layouts and report any unverified visual behaviour.
+For database changes, verify against a local MongoDB (`MONGODB_URL=mongodb://127.0.0.1:27017`, a scratch `MONGODB_DB`) and re-run the backend suite. For UI changes, check desktop and narrow layouts and report any unverified visual behaviour.
 
 ## Layout
 
