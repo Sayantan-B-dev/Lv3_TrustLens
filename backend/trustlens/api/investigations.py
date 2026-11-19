@@ -1,0 +1,357 @@
+"""Investigation API."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from ..config import Settings, get_settings
+from ..db import get_db
+from ..intelligence.normalize import (
+    InvalidInput,
+    detect_input_type,
+    normalize_url,
+    redact_url_for_display,
+)
+from ..intelligence.pipeline import CHECK_CATALOG, default_checks
+from ..intelligence.risk import RISK_CLASSES, RISK_DEFINITIONS
+from ..models import CheckResult, Feedback, Indicator, Investigation, ThreatReport, utcnow
+from ..security.redaction import redact_text
+from ..services.jobs import enqueue_investigation
+from ..services.reports import build_report_payload
+from .deps import Principal, audit, get_principal, owned_investigation, require_rate_limit
+from .serializers import iso, serialize_investigation
+
+router = APIRouter(prefix="/investigations", tags=["investigations"])
+
+
+class SubmitIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input: str = Field(min_length=1)
+    input_type: Literal["auto", "url", "message"] = "auto"
+    mode: Literal["automatic", "manual"] | None = None
+    checks: list[str] | None = None
+
+
+class RunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checks: list[str] | None = None
+
+
+class FeedbackIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["helpful", "false_positive", "missed_threat", "report_abuse"]
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+def normalise_checks(raw: list[str] | None, input_type: str) -> list[str]:
+    allowed = {key for key in CHECK_CATALOG if key != "message.heuristics" or input_type == "message"}
+    if not raw:
+        return default_checks(input_type)
+    unknown = [item for item in raw if item not in allowed]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown check(s): {', '.join(unknown[:5])}")
+    if input_type == "message" and "message.heuristics" not in raw:
+        raw = ["message.heuristics", *raw]
+    ordered = [key for key in CHECK_CATALOG if key in raw]
+    return ordered or default_checks(input_type)
+
+
+def _automation(db: Session, principal: Principal):
+    from ..models import AutomationSetting
+    from ..intelligence.pipeline import DEFAULT_CHECKS
+
+    key = f"{principal.kind}:{principal.id}"
+    setting = db.execute(
+        select(AutomationSetting).where(AutomationSetting.owner_key == key)
+    ).scalar_one_or_none()
+    if setting is None:
+        setting = AutomationSetting(
+            owner_key=key,
+            mode="automatic",
+            paused=False,
+            modules={check: True for check in DEFAULT_CHECKS},
+        )
+        db.add(setting)
+        db.commit()
+        db.refresh(setting)
+    return setting
+
+
+def _load_children(db: Session, investigation_id: str):
+    checks = (
+        db.execute(
+            select(CheckResult)
+            .where(CheckResult.investigation_id == investigation_id)
+            .order_by(CheckResult.id)
+        )
+        .scalars()
+        .all()
+    )
+    indicators = (
+        db.execute(
+            select(Indicator)
+            .where(Indicator.investigation_id == investigation_id)
+            .order_by(Indicator.id)
+        )
+        .scalars()
+        .all()
+    )
+    reports = (
+        db.execute(
+            select(ThreatReport)
+            .where(ThreatReport.investigation_id == investigation_id)
+            .order_by(ThreatReport.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return list(checks), list(indicators), list(reports)
+
+
+@router.post("", status_code=202)
+def submit(
+    payload: SubmitIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+    settings: Settings = Depends(get_settings),
+):
+    require_rate_limit(request, settings, strict=True)
+
+    raw = payload.input.strip()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Input is empty.")
+    if len(raw) > settings.max_input_chars:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Input is too long (maximum {settings.max_input_chars} characters).",
+        )
+
+    input_type = payload.input_type
+    if input_type == "auto":
+        try:
+            input_type = detect_input_type(raw)
+        except InvalidInput as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if input_type == "url":
+        try:
+            info = normalize_url(raw)
+        except InvalidInput as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        stored_input = info.url
+        display = redact_url_for_display(info.url)
+    else:
+        stored_input = raw[: settings.max_input_chars]
+        display = redact_text(raw[:160]) or "pasted message"
+
+    checks = normalise_checks(payload.checks, input_type)
+    automation = _automation(db, principal)
+    mode = payload.mode or automation.mode
+    paused = bool(automation.paused)
+    should_queue = mode == "automatic" and not paused
+
+    days = (
+        settings.user_retention_days
+        if principal.kind == "user"
+        else settings.anonymous_retention_days
+    )
+    investigation = Investigation(
+        owner_kind=principal.kind,
+        owner_id=principal.id,
+        input_type=input_type,
+        input_value=stored_input,
+        display_value=display,
+        mode=mode,
+        status="queued" if should_queue else "draft",
+        checks_requested=checks,
+        ruleset_version="trustlens-rules-v1",
+        expires_at=utcnow() + timedelta(days=days),
+    )
+    db.add(investigation)
+    db.commit()
+    db.refresh(investigation)
+
+    queued = False
+    if should_queue:
+        enqueue_investigation(
+            db,
+            investigation,
+            idempotency_key=f"investigation:{investigation.id}:initial",
+            settings=settings,
+        )
+        queued = True
+
+    audit(
+        db,
+        principal,
+        "investigation.created",
+        target=investigation.id,
+        detail={"input_type": input_type, "mode": mode, "queued": queued},
+    )
+    return {
+        "investigation": serialize_investigation(investigation, include_checks=False),
+        "queued": queued,
+        "paused": paused,
+        "message": (
+            "Investigation queued."
+            if queued
+            else "Saved. Manual mode or paused automation: run checks when ready."
+        ),
+    }
+
+
+@router.get("")
+def history(
+    limit: int = 12,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    limit = max(1, min(limit, 50))
+    offset = max(0, offset)
+    base = select(Investigation).where(
+        Investigation.owner_kind == principal.kind, Investigation.owner_id == principal.id
+    )
+    total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+    rows = (
+        db.execute(base.order_by(Investigation.created_at.desc()).offset(offset).limit(limit))
+        .scalars()
+        .all()
+    )
+    return {
+        "items": [serialize_investigation(row, include_checks=False) for row in rows],
+        "total": int(total),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/{investigation_id}")
+def detail(
+    investigation_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    investigation = owned_investigation(db, principal, investigation_id)
+    checks, indicators, reports = _load_children(db, investigation.id)
+    return serialize_investigation(
+        investigation, checks=checks, indicators=indicators, reports=reports
+    )
+
+
+@router.post("/{investigation_id}/run", status_code=202)
+def run(
+    investigation_id: str,
+    request: Request,
+    payload: RunIn | None = None,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+    settings: Settings = Depends(get_settings),
+):
+    require_rate_limit(request, settings, strict=True)
+    investigation = owned_investigation(db, principal, investigation_id)
+    if investigation.status in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="This investigation is already running.")
+
+    checks = normalise_checks(
+        payload.checks if payload else None, investigation.input_type
+    )
+    investigation.checks_requested = checks
+    investigation.status = "queued"
+    investigation.error = None
+    db.commit()
+
+    attempt = (
+        db.execute(
+            select(func.count())
+            .select_from(Investigation)
+            .where(Investigation.id == investigation.id)
+        ).scalar_one()
+    )
+    enqueue_investigation(
+        db,
+        investigation,
+        idempotency_key=f"investigation:{investigation.id}:run:{utcnow().isoformat()}:{attempt}",
+        settings=settings,
+    )
+    audit(db, principal, "investigation.queued", target=investigation.id, detail={"checks": checks})
+    return {"queued": True, "investigation": serialize_investigation(investigation, include_checks=False)}
+
+
+@router.delete("/{investigation_id}", status_code=204)
+def delete(
+    investigation_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    investigation = owned_investigation(db, principal, investigation_id)
+    db.delete(investigation)
+    db.commit()
+    audit(db, principal, "investigation.deleted", target=investigation_id)
+    return Response(status_code=204)
+
+
+@router.get("/{investigation_id}/export")
+def export(
+    investigation_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    investigation = owned_investigation(db, principal, investigation_id)
+    payload = build_report_payload(db, investigation)
+    import json
+
+    body = json.dumps(payload, indent=2, ensure_ascii=False)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="trustlens-{investigation.id[:8]}.json"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.post("/{investigation_id}/feedback", status_code=201)
+def feedback(
+    investigation_id: str,
+    payload: FeedbackIn,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    investigation = owned_investigation(db, principal, investigation_id)
+    if payload.kind == "report_abuse" and not (payload.comment or "").strip():
+        raise HTTPException(status_code=422, detail="Describe the abuse in the comment field.")
+    record = Feedback(
+        investigation_id=investigation.id,
+        owner_key=f"{principal.kind}:{principal.id}",
+        kind=payload.kind,
+        comment=redact_text(payload.comment or "")[:1000] or None,
+    )
+    db.add(record)
+    db.commit()
+    audit(db, principal, "feedback.created", target=investigation.id, detail={"kind": payload.kind})
+    return {"id": record.id, "status": record.status}
+
+
+@router.get("/meta/checks")
+def checks_meta():
+    return {
+        "checks": CHECK_CATALOG,
+        "defaults": {"url": default_checks("url"), "message": default_checks("message")},
+        "risk_classes": [
+            {"name": name, "definition": RISK_DEFINITIONS[name]} for name in RISK_CLASSES
+        ],
+        "ruleset_version": "trustlens-rules-v1",
+    }
